@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CAD Material Tracker - Live</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg-dark: #0a0e17;
+            --bg-card: #111827;
+            --bg-elevated: #1a2332;
+            --accent: #00D4FF;
+            --accent-dim: rgba(0, 212, 255, 0.15);
+            --accent-glow: rgba(0, 212, 255, 0.4);
+            --purple: #818CF8;
+            --red: #FF3B3B;
+            --red-dim: rgba(255, 59, 59, 0.15);
+            --text: #f0f6fc;
+            --text-dim: #8b949e;
+            --border: #30363d;
+            --success: #10B981;
+            --warning: #F59E0B;
+            --error: #EF4444;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        /* Background Grid */
+        .bg-grid {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: 
+                linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(180deg, var(--bg-card) 0%, transparent 100%);
+            border-bottom: 1px solid var(--border);
+            padding: 20px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            z-index: 10;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 20px var(--accent-glow);
+        }
+
+        .logo-icon i {
+            width: 26px;
+            height: 26px;
+            color: #000;
+        }
+
+        .logo-content {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .logo-text {
+            font-size: 1.4rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            line-height: 1.2;
+        }
+
+        .logo-subtitle {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            letter-spacing: 0.5px;
+        }
+
+
+        /* Main Layout */
+        .main-container {
+            display: flex;
+            height: calc(100vh - 65px);
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Upload Panel */
+        .upload-panel {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+        }
+
+        .upload-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+        }
+
+        .upload-card-title {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .upload-card-title h2 {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .upload-card-title p {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        .upload-zone {
+            border: 2px dashed var(--border);
+            border-radius: 16px;
+            padding: 50px 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 24px;
+            background: var(--bg-elevated);
+        }
+
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+            box-shadow: 0 0 30px var(--accent-glow);
+        }
+
+        .upload-zone input { display: none; }
+        .upload-icon { margin-bottom: 16px; }
+        .upload-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 8px; }
+        .upload-subtitle { color: var(--text-dim); font-size: 0.9rem; }
+
+        .file-selected {
+            background: var(--bg-elevated);
+            padding: 14px 18px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            border: 1px solid var(--accent);
+        }
+
+        .file-icon { display: flex; align-items: center; }
+        .file-info { flex: 1; }
+        .file-name { font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: var(--accent); }
+        .file-pages { color: var(--text-dim); font-size: 0.8rem; margin-top: 2px; }
+
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .form-group { flex: 1; }
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 12px 14px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-dim);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            color: #000;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px var(--accent-glow);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        /* Upload Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(10px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active { display: flex; }
+
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            min-width: 350px;
+        }
+
+        .loader {
+            width: 60px;
+            height: 60px;
+            border: 4px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .modal-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .modal-subtitle {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        /* Processing View */
+        .processing-view {
+            display: none;
+            width: 100%;
+        }
+
+        .processing-view.active { display: flex; }
+
+        /* Left Panel - Full Page Preview */
+        .left-panel {
+            width: 55%;
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-card);
+        }
+
+        .panel-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--bg-elevated);
+        }
+
+        .panel-title {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .page-info {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent);
+            font-size: 0.9rem;
+        }
+
+        .preview-container {
+            flex: 1;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-dark);
+            overflow: hidden;
+        }
+
+        .preview-container img {
+            max-width: 100%;
+            max-height: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 30px rgba(0,0,0,0.5);
+        }
+
+        .preview-placeholder {
+            text-align: center;
+            color: var(--text-dim);
+        }
+
+        .preview-placeholder .icon { margin-bottom: 16px; opacity: 0.5; }
+
+        /* Right Panel - Detected Drawings */
+        .right-panel {
+            width: 45%;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-card);
+        }
+
+        .drawings-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .drawing-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin-bottom: 12px;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+
+        .drawing-card.active {
+            border-color: var(--red);
+            box-shadow: 0 0 25px var(--red-dim);
+        }
+
+        .drawing-header {
+            padding: 10px 14px;
+            background: var(--bg-dark);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.9rem;
+        }
+
+        .drawing-number {
+            font-weight: 600;
+            color: var(--red);
+        }
+
+        .drawing-confidence {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-dim);
+            font-size: 0.8rem;
+        }
+
+        .drawing-preview {
+            padding: 12px;
+            background: var(--bg-dark);
+            display: flex;
+            justify-content: center;
+        }
+
+        .drawing-preview img {
+            max-width: 100%;
+            max-height: 150px;
+            border-radius: 6px;
+            border: 2px solid var(--border);
+        }
+
+        .drawing-tags {
+            padding: 10px 14px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .tag {
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .tag-found {
+            background: var(--accent-dim);
+            color: var(--accent);
+            border: 1px solid var(--accent);
+        }
+
+        .tag-none {
+            background: var(--bg-dark);
+            color: var(--text-dim);
+        }
+
+        /* Bottom Logs */
+        .logs-panel {
+            height: 180px;
+            border-top: 1px solid var(--border);
+            background: var(--bg-elevated);
+        }
+
+        .logs-header {
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .logs-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .logs-container {
+            height: calc(100% - 45px);
+            overflow-y: auto;
+            padding: 10px 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+        }
+
+        .log-entry {
+            padding: 4px 0;
+            display: flex;
+            gap: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .log-time { color: var(--text-dim); min-width: 70px; }
+        .log-icon { width: 16px; }
+        .log-success { color: var(--success); }
+        .log-warning { color: var(--warning); }
+        .log-error { color: var(--error); }
+        .log-info { color: var(--accent); }
+
+        /* Stats Bar */
+        .stats-bar {
+            display: flex;
+            gap: 20px;
+            padding: 12px 20px;
+            background: var(--bg-dark);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+
+        /* Progress */
+        .progress-bar {
+            height: 4px;
+            background: var(--bg-dark);
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--purple));
+            width: 0%;
+            transition: width 0.3s;
+        }
+
+        /* Results Panel */
+        .results-panel {
+            display: none;
+            padding: 20px;
+            background: var(--bg-card);
+            border-top: 1px solid var(--border);
+        }
+
+        .results-panel.active { display: block; }
+
+        .results-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .results-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .btn-download {
+            padding: 10px 20px;
+            background: var(--accent-dim);
+            border: 1px solid var(--accent);
+            border-radius: 8px;
+            color: var(--accent);
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+        }
+
+        .btn-download:hover {
+            background: var(--accent);
+            color: #000;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .results-table th, .results-table td {
+            padding: 10px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .results-table th {
+            background: var(--bg-elevated);
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+        }
+
+        .material-badge {
+            background: var(--accent-dim);
+            color: var(--accent);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-dark); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+    </style>
+</head>
+<body>
+    <div class="bg-grid"></div>
+
+    <!-- Upload Modal -->
+    <div class="modal-overlay" id="upload-modal">
+        <div class="modal-content">
+            <div class="loader"></div>
+            <div class="modal-title">Uploading PDF</div>
+            <div class="modal-subtitle" id="modal-filename">Please wait...</div>
+        </div>
+    </div>
+
+    <div class="header">
+        <div class="logo">
+            <div class="logo-icon">
+                <i data-lucide="building-2"></i>
+            </div>
+            <div class="logo-content">
+                <span class="logo-text">CAD Material Tracker</span>
+                <span class="logo-subtitle">AI-Powered Drawing Analysis</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <!-- Upload Panel -->
+        <div class="upload-panel" id="upload-panel">
+            <div class="upload-card">
+                <div class="upload-card-title">
+                    <h2>Upload CAD Drawings</h2>
+                    <p>Extract material tags from PDF drawings using AI</p>
+                </div>
+
+                <div class="upload-zone" id="dropzone">
+                    <input type="file" id="file-input" accept=".pdf">
+                    <div class="upload-icon"><i data-lucide="file-up" style="width:64px;height:64px;color:var(--accent)"></i></div>
+                    <div class="upload-title">Drop PDF Here</div>
+                    <div class="upload-subtitle">or click to browse</div>
+                </div>
+
+                <div class="file-selected" id="file-selected" style="display: none;">
+                    <div class="file-icon"><i data-lucide="file-check" style="width:24px;height:24px;color:var(--success)"></i></div>
+                    <div class="file-info">
+                        <div class="file-name" id="file-name"></div>
+                        <div class="file-pages" id="file-pages"></div>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Start Page <span style="color:var(--text-dim);font-weight:normal">(optional)</span></label>
+                        <input type="number" id="start-page" placeholder="1" min="1">
+                    </div>
+                    <div class="form-group">
+                        <label>End Page <span style="color:var(--text-dim);font-weight:normal">(optional)</span></label>
+                        <input type="number" id="end-page" placeholder="All" min="1">
+                    </div>
+                </div>
+
+                <button class="btn btn-primary" id="start-btn" disabled onclick="startProcessing()">
+                    <i data-lucide="play" style="width:18px;height:18px"></i> Start Processing
+                </button>
+            </div>
+        </div>
+
+        <!-- Processing View -->
+        <div class="processing-view" id="processing-view">
+            <!-- Left: Full Page Preview -->
+            <div class="left-panel">
+                <div class="panel-header">
+                    <div class="panel-title"><i data-lucide="file-image" style="width:18px;height:18px"></i> Full Page Preview</div>
+                    <div class="page-info" id="page-info">Page 0 / 0</div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <div class="preview-container" id="full-page-preview">
+                    <div class="preview-placeholder">
+                        <div class="icon"><i data-lucide="file-scan" style="width:48px;height:48px"></i></div>
+                        <div>Waiting for page...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: Detected Drawings -->
+            <div class="right-panel">
+                <div class="panel-header">
+                    <div class="panel-title"><i data-lucide="scan" style="width:18px;height:18px"></i> Detected Drawings</div>
+                    <div class="page-info" id="drawing-count">0 drawings</div>
+                </div>
+                <div class="stats-bar">
+                    <div class="stat">
+                        <div class="stat-value" id="stat-pages">0</div>
+                        <div class="stat-label">Pages</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="stat-drawings">0</div>
+                        <div class="stat-label">Drawings</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value" id="stat-tags">0</div>
+                        <div class="stat-label">Tags</div>
+                    </div>
+                </div>
+                <div class="drawings-scroll" id="drawings-container">
+                    <div style="text-align: center; color: var(--text-dim); padding: 40px;">
+                        Waiting for detections...
+                    </div>
+                </div>
+                <div class="logs-panel">
+                    <div class="logs-header">
+                        <div class="logs-title"><i data-lucide="terminal" style="width:16px;height:16px"></i> Live Logs</div>
+                    </div>
+                    <div class="logs-container" id="logs-container"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Panel -->
+    <div class="results-panel" id="results-panel">
+        <div class="results-header">
+            <div class="results-title"><i data-lucide="table-2" style="width:20px;height:20px"></i> Extraction Results</div>
+            <button class="btn-download" onclick="downloadResults()"><i data-lucide="download" style="width:16px;height:16px"></i> Download CSV</button>
+        </div>
+        <table class="results-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Material</th>
+                    <th>Description</th>
+                    <th>Sheet</th>
+                    <th>Page</th>
+                </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+        </table>
+    </div>
+
+    <script>
+        let ws = null;
+        let uploadedFilePath = null;
+        let totalPages = 0;
+        let currentDrawings = [];
+        let stats = { pages: 0, drawings: 0, tags: 0 };
+
+        // File upload handlers
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('file-input');
+        const uploadModal = document.getElementById('upload-modal');
+
+        dropzone.addEventListener('click', () => fileInput.click());
+        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFileUpload(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) handleFileUpload(fileInput.files[0]);
+        });
+
+        async function handleFileUpload(file) {
+            // Show upload modal
+            document.getElementById('modal-filename').textContent = file.name;
+            uploadModal.classList.add('active');
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload', { method: 'POST', body: formData });
+                const data = await response.json();
+                
+                uploadedFilePath = data.path;
+                totalPages = data.pages;
+                
+                // Hide modal
+                uploadModal.classList.remove('active');
+                
+                document.getElementById('file-selected').style.display = 'flex';
+                document.getElementById('file-name').textContent = data.filename;
+                document.getElementById('file-pages').textContent = `${data.pages} pages`;
+                document.getElementById('end-page').placeholder = data.pages;
+                document.getElementById('start-btn').disabled = false;
+                
+                addLog('info', `Uploaded: ${data.filename} (${data.pages} pages)`);
+            } catch (error) {
+                uploadModal.classList.remove('active');
+                addLog('error', 'Upload failed: ' + error.message);
+            }
+        }
+
+        function startProcessing() {
+            document.getElementById('upload-panel').style.display = 'none';
+            document.getElementById('processing-view').classList.add('active');
+            
+            currentDrawings = [];
+            stats = { pages: 0, drawings: 0, tags: 0 };
+            document.getElementById('drawings-container').innerHTML = '';
+            document.getElementById('logs-container').innerHTML = '';
+            
+            // Connect WebSocket
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
+            
+            ws.onopen = () => {
+                const startVal = document.getElementById('start-page').value;
+                const endVal = document.getElementById('end-page').value;
+                ws.send(JSON.stringify({
+                    action: 'process',
+                    pdf_path: uploadedFilePath,
+                    start_page: startVal ? parseInt(startVal) : 1,
+                    end_page: endVal ? parseInt(endVal) : totalPages
+                }));
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+            };
+            
+            ws.onerror = (error) => addLog('error', 'WebSocket error');
+            ws.onclose = () => addLog('info', 'Connection closed');
+        }
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'info':
+                    totalPages = data.total_pages;
+                    break;
+                    
+                case 'page_start':
+                    document.getElementById('page-info').textContent = `Page ${data.page} (Sheet ${data.sheet})`;
+                    const progress = (data.progress / data.total) * 100;
+                    document.getElementById('progress-fill').style.width = progress + '%';
+                    currentDrawings = [];
+                    document.getElementById('drawings-container').innerHTML = '';
+                    addLog('info', `Processing page ${data.page} - Sheet ${data.sheet}`);
+                    stats.pages++;
+                    updateStats();
+                    break;
+                    
+                case 'full_page':
+                    document.getElementById('full-page-preview').innerHTML = 
+                        `<img src="data:image/jpeg;base64,${data.image}" alt="Page ${data.page}">`;
+                    document.getElementById('drawing-count').textContent = `${data.drawing_count} drawings`;
+                    addLog('success', `Found ${data.drawing_count} drawings on page ${data.page}`);
+                    break;
+                    
+                case 'drawing':
+                    stats.drawings++;
+                    updateStats();
+                    
+                    const drawingHtml = `
+                        <div class="drawing-card active" id="drawing-${data.index}">
+                            <div class="drawing-header">
+                                <span class="drawing-number">Drawing #${data.index}</span>
+                                <span class="drawing-confidence">${data.confidence}</span>
+                            </div>
+                            <div class="drawing-preview">
+                                <img src="data:image/jpeg;base64,${data.image}" alt="Drawing ${data.index}">
+                            </div>
+                            <div class="drawing-tags" id="tags-${data.index}">
+                                <span class="tag tag-none">Scanning...</span>
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('drawings-container').innerHTML += drawingHtml;
+                    
+                    document.querySelectorAll('.drawing-card').forEach(c => c.classList.remove('active'));
+                    document.getElementById(`drawing-${data.index}`).classList.add('active');
+                    document.getElementById(`drawing-${data.index}`).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    lucide.createIcons();
+                    break;
+                    
+                case 'ocr_result':
+                    const tagsContainer = document.getElementById(`tags-${data.drawing_index}`);
+                    if (tagsContainer) {
+                        if (data.tags_found && data.tags_found.length > 0) {
+                            tagsContainer.innerHTML = data.tags_found
+                                .map(t => `<span class="tag tag-found">${t}</span>`)
+                                .join('');
+                            stats.tags += data.tags_found.length;
+                            updateStats();
+                            addLog('success', `Found tags: ${data.tags_found.join(', ')}`);
+                        } else {
+                            tagsContainer.innerHTML = '<span class="tag tag-none">No tags found</span>';
+                        }
+                    }
+                    break;
+                    
+                case 'log':
+                    addLog(data.level, data.message);
+                    break;
+                    
+                case 'complete':
+                    addLog('success', `Complete! Found ${data.total_tags} material tags`);
+                    
+                    if (data.results && data.results.length > 0) {
+                        showResults(data.results);
+                    }
+                    break;
+                    
+                case 'error':
+                    addLog('error', data.message);
+                    break;
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('stat-pages').textContent = stats.pages;
+            document.getElementById('stat-drawings').textContent = stats.drawings;
+            document.getElementById('stat-tags').textContent = stats.tags;
+        }
+
+        function addLog(level, message) {
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const icons = { info: '→', success: '✓', warning: '⚠', error: '✗' };
+            const logHtml = `
+                <div class="log-entry">
+                    <span class="log-time">${time}</span>
+                    <span class="log-icon log-${level}">${icons[level] || '→'}</span>
+                    <span>${message}</span>
+                </div>
+            `;
+            document.getElementById('logs-container').innerHTML += logHtml;
+            document.getElementById('logs-container').scrollTop = document.getElementById('logs-container').scrollHeight;
+        }
+
+        function showResults(results) {
+            document.getElementById('results-panel').classList.add('active');
+            const tbody = document.getElementById('results-body');
+            tbody.innerHTML = results.map((r, i) => `
+                <tr>
+                    <td>${i + 1}</td>
+                    <td><span class="material-badge">${r.material}</span></td>
+                    <td>${r.description}</td>
+                    <td>${r.sheet}</td>
+                    <td>${r.page}</td>
+                </tr>
+            `).join('');
+        }
+
+        function downloadResults() {
+            window.location.href = '/download';
+        }
+
+        // Initialize Lucide icons
+        lucide.createIcons();
+    </script>
+</body>
+</html>
