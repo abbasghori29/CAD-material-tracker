@@ -2,7 +2,7 @@
 
 AI-powered web application for extracting material tags from CAD drawings using Roboflow detection and OCR.
 
-![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.12-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.122-green.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
@@ -20,7 +20,8 @@ AI-powered web application for extracting material tags from CAD drawings using 
 ### Prerequisites
 
 Before starting, ensure you have:
-- Python 3.12 or higher ([Download Python](https://www.python.org/downloads/))
+- **Python 3.12** specifically ([Download Python 3.12](https://www.python.org/downloads/release/python-3120/))
+  - **Why Python 3.12?** The Roboflow `inference-sdk` package (required for AI detection) only works with Python 3.12. This is a hard requirement, not optional.
 - Git (if cloning from repository)
 - Tesseract OCR ([Download here](https://github.com/UB-Mannheim/tesseract/wiki))
 - Roboflow API key ([Get one here](https://roboflow.com))
@@ -41,21 +42,36 @@ cd Archive
 cd Archive
 ```
 
-#### Step 2: Create Virtual Environment
+#### Step 2: Create Virtual Environment with Python 3.12
 
-```bash
-# Create virtual environment
-python -m venv venv
+**Important:** This project requires Python 3.12 specifically because the Roboflow `inference-sdk` package (used for AI-powered CAD drawing detection) only supports Python 3.12. Create the virtual environment using Python 3.12:
+
+**Windows:**
+```powershell
+# Using Python Launcher (recommended)
+py -3.12 -m venv venv312
+
+# Or if python3.12 is in your PATH
+python3.12 -m venv venv312
 
 # Activate virtual environment
-# Windows:
-venv\Scripts\activate
-
-# Mac/Linux:
-source venv/bin/activate
+venv312\Scripts\Activate.ps1
 ```
 
-You should see `(venv)` in your terminal prompt when activated.
+**Mac/Linux:**
+```bash
+# Create virtual environment with Python 3.12
+python3.12 -m venv venv312
+
+# Activate virtual environment
+source venv312/bin/activate
+```
+
+**Note:** If you have multiple Python versions installed, you can check which versions are available:
+- Windows: `py -0` (lists all installed Python versions)
+- Mac/Linux: `python3.12 --version` (verify Python 3.12 is installed)
+
+You should see `(venv312)` in your terminal prompt when activated.
 
 #### Step 3: Install Python Dependencies
 
@@ -135,6 +151,8 @@ test -f .env && echo ".env file found"
 
 #### Step 7: Run the Application
 
+**Make sure your virtual environment is activated first!** You should see `(venv312)` in your terminal prompt.
+
 **Option A: Using uvicorn (recommended)**
 ```bash
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
@@ -143,6 +161,11 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 **Option B: Using Python directly**
 ```bash
 python app.py
+```
+
+**Quick command to activate and run (Windows PowerShell):**
+```powershell
+venv312\Scripts\Activate.ps1; uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 You should see output like:
@@ -166,7 +189,9 @@ You should see the CAD Material Tracker interface.
 
 ### First Run Checklist
 
-- [ ] Virtual environment activated
+- [ ] Python 3.12 installed and verified
+- [ ] Virtual environment `venv312` created with Python 3.12
+- [ ] Virtual environment activated (you see `(venv312)` in terminal)
 - [ ] All Python packages installed (`pip install -r requirements.txt`)
 - [ ] Tesseract OCR installed and verified
 - [ ] `.env` file created with `ROBOFLOW_API_KEY` and `ROBOFLOW_MODEL_ID`
