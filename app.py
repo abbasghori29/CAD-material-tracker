@@ -21,6 +21,34 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# OpenAI Vision for location description extraction
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, Field
+
+class DrawingLocationInfo(BaseModel):
+    """Extracted location information from a CAD drawing."""
+    location_description: str = Field(
+        description="The location identifier/description found in the drawing title block or header. Examples: 'E1 1/8 RCP - LEVEL 3 PART B', 'C3 KITCHEN E1 ELEVATION 2', 'B1 SECTION AT EAST OF GARAGE - NS'. Return empty string if not found."
+    )
+
+# OpenAI setup for vision
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_AVAILABLE = bool(OPENAI_API_KEY)
+VISION_LLM = None
+
+if OPENAI_AVAILABLE:
+    try:
+        VISION_LLM = ChatOpenAI(
+            model="gpt-4o",
+            temperature=0,
+            api_key=OPENAI_API_KEY
+        )
+        print(f"OpenAI Vision enabled with gpt-4o model")
+    except Exception as e:
+        print(f"WARNING: Failed to initialize OpenAI: {e}")
+        OPENAI_AVAILABLE = False
+
 # Import extraction logic
 import pdfplumber
 import re
@@ -64,22 +92,39 @@ try:
 except ImportError:
     pass
 
-# Tesseract setup
+# Tesseract setup - works on both Windows and Linux
 try:
     import pytesseract
-    # Check Windows paths first, then Linux paths
+    import shutil
+    
+    # Common installation paths for Windows and Linux
     tesseract_paths = [
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # Windows
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # Windows default
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",  # Windows x86
-        "/usr/local/bin/tesseract",  # Linux (compiled from source)
+        "/usr/local/bin/tesseract",  # Linux (compiled from source on EC2)
         "/usr/bin/tesseract",  # Linux (package manager)
+        "/opt/homebrew/bin/tesseract",  # macOS Homebrew ARM
+        "/usr/local/Cellar/tesseract/*/bin/tesseract",  # macOS Homebrew Intel
     ]
+    
+    tesseract_found = False
     for path in tesseract_paths:
         if os.path.exists(path):
             pytesseract.pytesseract.tesseract_cmd = path
+            tesseract_found = True
+            print(f"Tesseract found at: {path}")
             break
+    
+    # Fallback: check if tesseract is in system PATH
+    if not tesseract_found:
+        tesseract_in_path = shutil.which("tesseract")
+        if tesseract_in_path:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_in_path
+            print(f"Tesseract found in PATH: {tesseract_in_path}")
+        else:
+            print("WARNING: Tesseract not found! OCR will not work.")
 except ImportError:
-    pass
+    print("WARNING: pytesseract not installed")
 
 # FastAPI app
 app = FastAPI(title="CAD Material Tracker")
@@ -192,8 +237,87 @@ def ocr_image(img: Image.Image) -> str:
         buffered.seek(0)
         
         from pytesseract import image_to_string
+        # PSM 11 = Sparse text - finds scattered text in any order (best for CAD drawings)
         return image_to_string(Image.open(buffered), config='--psm 11 --oem 3')
     except:
+        return ""
+
+
+def extract_location_description(img: Image.Image) -> str:
+    """Extract location description from CAD drawing using OpenAI Vision."""
+    if not OPENAI_AVAILABLE or VISION_LLM is None:
+        return ""
+    
+    try:
+        # Convert image to base64
+        buffered = BytesIO()
+        # Ensure RGB mode for JPEG
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        img.save(buffered, format='JPEG', quality=85)
+        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        
+        # Create structured LLM for extraction
+        structured_llm = VISION_LLM.with_structured_output(DrawingLocationInfo)
+        
+        # Create the message with strong prompt
+        message = HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": """You are an expert at reading architectural and engineering CAD drawings.
+
+TASK: Extract the COMPLETE LOCATION DESCRIPTION from this CAD drawing image.
+
+The location description is typically found in:
+- The drawing title block (usually bottom right corner or top)
+- The drawing header or label area
+- Near the drawing number/sheet reference
+
+CRITICAL: Location descriptions usually START with a DRAWING IDENTIFIER like:
+- E1, E2, E3... (Elevations)
+- A1, A2, A3... (Architectural)
+- S1, S2, S3... (Structural)
+- C1, C2, C3... (Civil)
+- B1, B2, B3... (Building sections)
+- P1, P2, P3... (Plumbing)
+- M1, M2, M3... (Mechanical)
+
+FULL EXAMPLES of location descriptions:
+- "E3 1/8 ELEVATION COURTYARD WEST" (E3 is the drawing ID, must be included!)
+- "E1 1/8 RCP - LEVEL 3 PART B"
+- "C3 KITCHEN E1 ELEVATION 2"
+- "B1 SECTION AT EAST OF GARAGE - NS"
+- "A101 - GROUND FLOOR PLAN - EAST WING"
+- "S2 STRUCTURAL FRAMING PLAN LEVEL 2"
+- "3 DETAIL AT PARAPET"
+
+IMPORTANT RULES:
+1. ALWAYS include the drawing identifier prefix (E3, A1, B2, S1, etc.) if present
+2. Include scale indicators like "1/8", "1/4", "3/16" if shown
+3. Include drawing type keywords: RCP, PLAN, ELEVATION, SECTION, DETAIL, FRAMING
+4. Include location keywords: LEVEL, FLOOR, COURTYARD, EAST, WEST, NORTH, SOUTH
+5. Include any grid references, room names, or area identifiers
+6. Combine ALL related text elements that form the complete location description
+7. Return the FULL location description exactly as shown, preserving the format
+8. If no clear location description is visible, return an empty string
+
+Extract the COMPLETE location description from this CAD drawing:"""
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                },
+            ]
+        )
+        
+        # Invoke the model
+        result = structured_llm.invoke([message])
+        
+        return result.location_description.strip() if result.location_description else ""
+        
+    except Exception as e:
+        print(f"Location extraction error: {e}")
         return ""
 
 
@@ -290,8 +414,33 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         "bbox": crop_data["bbox"]
                     })
                     
-                    # OCR the drawing
-                    text = ocr_image(cropped_img)
+                    # Run Location Extraction (OpenAI) and OCR (Tesseract) in PARALLEL
+                    await broadcast({
+                        "type": "log",
+                        "level": "info",
+                        "message": f"Processing drawing {i + 1} (Location + OCR in parallel)..."
+                    })
+                    
+                    # Run both tasks in parallel using thread pool
+                    async def get_location():
+                        if OPENAI_AVAILABLE:
+                            return await asyncio.to_thread(extract_location_description, cropped_img)
+                        return ""
+                    
+                    async def get_ocr():
+                        return await asyncio.to_thread(ocr_image, cropped_img)
+                    
+                    # Execute in parallel and wait for both results
+                    location_desc, text = await asyncio.gather(get_location(), get_ocr())
+                    
+                    if location_desc:
+                        await broadcast({
+                            "type": "log",
+                            "level": "success",
+                            "message": f"Location: {location_desc}"
+                        })
+                    
+                    # Process OCR results for tags
                     found_tags = TAG_PATTERN.findall(text)
                     
                     matched_tags = []
@@ -305,16 +454,18 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                                     "description": TAG_DESCRIPTIONS.get(t, "Unknown"),
                                     "sheet": sheet,
                                     "page": page_num,
-                                    "confidence": f"{conf:.0%}"
+                                    "confidence": f"{conf:.0%}",
+                                    "location": location_desc
                                 })
                                 break
                     
-                    # Send OCR result
+                    # Send OCR result with location
                     await broadcast({
                         "type": "ocr_result",
                         "drawing_index": i + 1,
                         "tags_found": matched_tags,
-                        "text_preview": text[:100] if text else "No text found"
+                        "text_preview": text[:100] if text else "No text found",
+                        "location": location_desc
                     })
                     
                     await asyncio.sleep(0.05)  # Small delay for smooth UI
@@ -332,9 +483,9 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
             csv_path = os.path.join(RESULTS_FOLDER, "results.csv")
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Count", "Material", "Description", "Sheet", "Page", "Confidence"])
+                writer.writerow(["Count", "Material", "Description", "Sheet", "Page", "Confidence", "Location"])
                 for i, r in enumerate(results, 1):
-                    writer.writerow([i, r["material"], r["description"], r["sheet"], r["page"], r["confidence"]])
+                    writer.writerow([i, r["material"], r["description"], r["sheet"], r["page"], r["confidence"], r.get("location", "")])
             
             await broadcast({
                 "type": "complete",
@@ -363,6 +514,7 @@ async def home(request: Request):
     return templates.TemplateResponse("index.html", {
         "request": request,
         "roboflow_available": ROBOFLOW_AVAILABLE,
+        "openai_available": OPENAI_AVAILABLE,
         "tag_count": len(TAG_DESCRIPTIONS)
     })
 

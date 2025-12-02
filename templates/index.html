@@ -283,6 +283,11 @@
             to { transform: rotate(360deg); }
         }
 
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
         .modal-title {
             font-size: 1.2rem;
             font-weight: 600;
@@ -595,6 +600,32 @@
             font-weight: 600;
         }
 
+        .location-cell {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--purple);
+            max-width: 250px;
+            word-wrap: break-word;
+        }
+
+        .drawing-location {
+            padding: 8px 14px;
+            background: var(--bg-dark);
+            border-top: 1px solid var(--border);
+            font-size: 0.8rem;
+        }
+
+        .drawing-location-label {
+            color: var(--text-dim);
+            margin-right: 6px;
+        }
+
+        .drawing-location-value {
+            color: var(--purple);
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+        }
+
         /* Scrollbar */
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: var(--bg-dark); }
@@ -733,6 +764,7 @@
                     <th>#</th>
                     <th>Material</th>
                     <th>Description</th>
+                    <th>Location</th>
                     <th>Sheet</th>
                     <th>Page</th>
                 </tr>
@@ -881,6 +913,10 @@
                             <div class="drawing-preview">
                                 <img src="data:image/jpeg;base64,${data.image}" alt="Drawing ${data.index}">
                             </div>
+                            <div class="drawing-location" id="location-${data.index}">
+                                <span class="drawing-location-label">📍 Location:</span>
+                                <span class="drawing-location-value">Extracting...</span>
+                            </div>
                             <div class="drawing-tags" id="tags-${data.index}">
                                 <span class="tag tag-none">Scanning...</span>
                             </div>
@@ -906,6 +942,22 @@
                             addLog('success', `Found tags: ${data.tags_found.join(', ')}`);
                         } else {
                             tagsContainer.innerHTML = '<span class="tag tag-none">No tags found</span>';
+                        }
+                    }
+                    
+                    // Update location display
+                    const locationContainer = document.getElementById(`location-${data.drawing_index}`);
+                    if (locationContainer) {
+                        if (data.location && data.location.trim()) {
+                            locationContainer.innerHTML = `
+                                <span class="drawing-location-label">📍 Location:</span>
+                                <span class="drawing-location-value">${data.location}</span>
+                            `;
+                        } else {
+                            locationContainer.innerHTML = `
+                                <span class="drawing-location-label">📍 Location:</span>
+                                <span class="drawing-location-value" style="color: var(--text-dim);">Not detected</span>
+                            `;
                         }
                     }
                     break;
@@ -962,6 +1014,7 @@
                     <td>${i + 1}</td>
                     <td><span class="material-badge">${r.material}</span></td>
                     <td>${r.description}</td>
+                    <td class="location-cell">${r.location || '-'}</td>
                     <td>${r.sheet}</td>
                     <td>${r.page}</td>
                 </tr>

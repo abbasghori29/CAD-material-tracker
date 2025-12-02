@@ -262,11 +262,64 @@ The `material_descriptions.json` file contains mappings of material tags to thei
 - `WebSocket /ws` - Real-time updates
 - `GET /download` - Download results CSV
 
+## AWS EC2 Deployment (CI/CD)
+
+This project includes a fully automated CI/CD pipeline that deploys to AWS EC2 on every push to `main`.
+
+### GitHub Secrets Required
+
+| Secret | Description | Example |
+|--------|-------------|---------|
+| `EC2_HOST` | EC2 public IP address | `13.61.181.68` |
+| `EC2_SSH_KEY` | Private SSH key (PEM format) | `-----BEGIN RSA PRIVATE KEY-----...` |
+| `ROBOFLOW_API_KEY` | Your Roboflow API key | `abc123...` |
+| `ROBOFLOW_MODEL_ID` | Roboflow model ID | `cad-drawing-iy9tc/11` |
+
+### What the CI/CD Does Automatically
+
+1. **System Setup**: Configures kernel buffers for large file uploads
+2. **Python 3.12**: Installs Python 3.12 and creates venv
+3. **Tesseract OCR**: Builds from source (Amazon Linux 2023 compatibility)
+4. **Nginx**: Configures reverse proxy with WebSocket support
+5. **Systemd Service**: Sets up auto-restart on crash
+6. **Large File Support**: 2GB upload limit, 2-hour timeouts
+7. **WebSocket**: 24-hour keepalive for long processing jobs
+
+### EC2 Instance Requirements
+
+- **OS**: Amazon Linux 2023 (recommended)
+- **Instance Type**: `t3.medium` or larger (for processing PDFs)
+- **Storage**: 20GB+ EBS volume
+- **Security Group**: Allow ports 22 (SSH), 80 (HTTP)
+
+### Manual Deployment Commands
+
+If you need to deploy manually:
+
+```bash
+# SSH into EC2
+ssh -i your-key.pem ec2-user@your-ec2-ip
+
+# Check service status
+sudo systemctl status cad-tracker
+
+# View logs
+sudo journalctl -u cad-tracker -f
+
+# Restart service
+sudo systemctl restart cad-tracker
+
+# Check Nginx
+sudo nginx -t
+sudo systemctl restart nginx
+```
+
 ## Troubleshooting
 
 ### Tesseract not found
 - Ensure Tesseract is installed and in your PATH
 - On Windows, the app auto-detects common installation paths
+- On Linux/EC2, Tesseract is built from source at `/usr/local/bin/tesseract`
 - Verify installation: `tesseract --version`
 
 ### Roboflow errors
@@ -278,5 +331,26 @@ The `material_descriptions.json` file contains mappings of material tags to thei
 - Ensure PDF contains CAD drawings
 - Try different pages (some pages may not have drawings)
 - Check Roboflow model confidence threshold (default: 0.8)
+
+### WebSocket disconnects (EC2)
+- The CI/CD configures 24-hour WebSocket timeouts
+- If still disconnecting, check Nginx logs: `sudo tail -f /var/log/nginx/error.log`
+- Verify service is running: `sudo systemctl status cad-tracker`
+
+### Large file upload fails
+- Maximum file size is 2GB
+- Upload timeout is 2 hours
+- Check Nginx logs for errors
+- Ensure EC2 has enough disk space: `df -h`
+
+### OCR returns empty results (EC2)
+- Verify Tesseract path: `which tesseract` (should be `/usr/local/bin/tesseract`)
+- Check language data: `ls /usr/local/share/tessdata/`
+- Service must have `TESSDATA_PREFIX` environment variable set
+
+### Service crashes repeatedly
+- Check logs: `sudo journalctl -u cad-tracker -n 100`
+- Verify Python packages: `source venv312/bin/activate && pip list`
+- Check disk space and memory: `df -h && free -m`
 
 

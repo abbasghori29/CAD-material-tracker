@@ -1,6 +1,7 @@
 # CI/CD Pipeline for CAD Material Tracker
 # Fully automated: Push to main → Deployed to EC2
-# No manual SSH required!
+# Includes all fixes for: Tesseract, OpenCV, Nginx, WebSocket, Large files
+# Required GitHub Secrets: EC2_HOST, EC2_SSH_KEY, ROBOFLOW_API_KEY, ROBOFLOW_MODEL_ID, OPENAI_API_KEY
 
 name: Deploy to AWS EC2
 
@@ -8,7 +9,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 env:
   APP_NAME: cad-material-tracker
@@ -30,72 +31,108 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
-          command_timeout: 30m
+          command_timeout: 60m
           script: |
             set -e
             
             echo "🚀 Starting deployment..."
             
             # ========================================
-            # FIRST-TIME SETUP (runs only if needed)
+            # SYSTEM CONFIGURATION (Large file support)
             # ========================================
             
-            # Install Python 3.12 if not installed
+            echo "⚙️ Configuring system for large file uploads..."
+            
+            # Kernel network buffers for large uploads
+            if ! grep -q "net.core.rmem_max" /etc/sysctl.conf; then
+              sudo tee -a /etc/sysctl.conf > /dev/null << 'SYSCTL'
+            net.core.rmem_max = 134217728
+            net.core.wmem_max = 134217728
+            net.ipv4.tcp_rmem = 4096 87380 134217728
+            net.ipv4.tcp_wmem = 4096 65536 134217728
+            net.ipv4.tcp_keepalive_time = 600
+            net.ipv4.tcp_keepalive_intvl = 60
+            net.ipv4.tcp_keepalive_probes = 10
+            fs.file-max = 65535
+            SYSCTL
+              sudo sysctl -p || true
+            fi
+            
+            # ========================================
+            # INSTALL DEPENDENCIES
+            # ========================================
+            
+            # Install Python 3.12
             if ! command -v python3.12 &> /dev/null; then
               echo "📦 Installing Python 3.12..."
               sudo dnf install -y python3.12 python3.12-pip python3.12-devel
             fi
             
-            # Install Tesseract if not installed
-            if ! command -v tesseract &> /dev/null; then
-              echo "📝 Installing Tesseract OCR..."
-              
-              # Amazon Linux 2023 - Install EPEL repository first
-              sudo dnf install -y epel-release || sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm || true
-              
-              # Install Tesseract from EPEL
-              sudo dnf install -y tesseract tesseract-langpack-eng || {
-                echo "📝 EPEL method failed, building from source..."
-                
-                # Install build dependencies
-                sudo dnf groupinstall -y "Development Tools"
-                sudo dnf install -y autoconf automake libtool gettext libjpeg-turbo-devel libpng-devel giflib-devel freetype-devel wget
-                
-                # Install Leptonica (required dependency)
-                cd /tmp
-                wget -q http://www.leptonica.org/source/leptonica-1.82.0.tar.gz
-                tar -xzf leptonica-1.82.0.tar.gz
-                cd leptonica-1.82.0
-                ./configure --quiet && make -j4 && sudo make install
-                
-                # Install Tesseract
-                cd /tmp
-                wget -q https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.3.0.tar.gz
-                tar -xzf 5.3.0.tar.gz
-                cd tesseract-5.3.0
-                ./autogen.sh
-                ./configure --quiet && make -j4 && sudo make install
-                sudo ldconfig
-                
-                # Download English language data
-                sudo mkdir -p /usr/local/share/tessdata
-                sudo wget -q -O /usr/local/share/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
-                
-                cd /home/ec2-user
-              }
-              
-              # Verify installation
-              tesseract --version || echo "⚠️ Tesseract installation may have issues"
-            fi
-            
-            # Install Git if not installed
+            # Install Git
             if ! command -v git &> /dev/null; then
               echo "📂 Installing Git..."
               sudo dnf install -y git
             fi
             
+            # Install OpenCV dependencies (libGL fix)
+            echo "📦 Installing OpenCV dependencies..."
+            sudo dnf install -y mesa-libGL mesa-libGL-devel libglvnd-glx || true
+            
             # ========================================
-            # NGINX SETUP WITH WEBSOCKET SUPPORT
+            # TESSERACT OCR (Build from source for Amazon Linux 2023)
+            # ========================================
+            
+            if ! command -v tesseract &> /dev/null; then
+              echo "📝 Installing Tesseract OCR from source..."
+              
+              # Install build dependencies
+              sudo dnf groupinstall -y "Development Tools" || true
+              sudo dnf install -y autoconf automake libtool wget libjpeg-turbo-devel libpng-devel libtiff-devel zlib-devel giflib-devel freetype-devel || true
+              
+              # Install Leptonica (required by Tesseract)
+              cd /tmp
+              if [ ! -f /usr/local/lib/liblept.so ]; then
+                echo "📦 Building Leptonica..."
+                wget -q http://www.leptonica.org/source/leptonica-1.82.0.tar.gz || true
+                tar -xzf leptonica-1.82.0.tar.gz || true
+                cd leptonica-1.82.0
+                ./configure --quiet
+                make -j$(nproc)
+                sudo make install
+                sudo ldconfig
+              fi
+              
+              # Install Tesseract
+              cd /tmp
+              if [ ! -f /usr/local/bin/tesseract ]; then
+                echo "📦 Building Tesseract..."
+                wget -q https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.3.0.tar.gz || true
+                tar -xzf 5.3.0.tar.gz || true
+                cd tesseract-5.3.0
+                export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+                export LD_LIBRARY_PATH=/usr/local/lib
+                ./autogen.sh
+                ./configure --quiet
+                make -j$(nproc)
+                sudo make install
+                sudo ldconfig
+              fi
+              
+              # Download English language data
+              sudo mkdir -p /usr/local/share/tessdata
+              if [ ! -f /usr/local/share/tessdata/eng.traineddata ]; then
+                echo "📦 Downloading Tesseract language data..."
+                sudo wget -q -O /usr/local/share/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
+              fi
+              
+              cd /home/ec2-user
+            fi
+            
+            # Verify Tesseract
+            tesseract --version || echo "⚠️ Tesseract verification failed"
+            
+            # ========================================
+            # NGINX SETUP (Large files + WebSocket)
             # ========================================
             
             if ! command -v nginx &> /dev/null; then
@@ -103,81 +140,87 @@ jobs:
               sudo dnf install -y nginx
             fi
             
-            # Always update Nginx config (ensures WebSocket support)
-            echo "🌐 Configuring Nginx with WebSocket support..."
-            sudo tee /etc/nginx/conf.d/cad-tracker.conf > /dev/null << 'NGINXEOF'
-            # CAD Material Tracker - Nginx Configuration
-            # Supports: HTTP, WebSocket (ws/wss), Large file uploads
+            echo "🌐 Configuring Nginx for large files and WebSocket..."
             
+            # Create temp directory for uploads
+            sudo mkdir -p /tmp/nginx_uploads
+            sudo chown nginx:nginx /tmp/nginx_uploads 2>/dev/null || sudo chown ec2-user:ec2-user /tmp/nginx_uploads
+            sudo chmod 755 /tmp/nginx_uploads
+            
+            # Nginx config with all fixes
+            sudo tee /etc/nginx/conf.d/cad-tracker.conf > /dev/null << 'NGINXCONF'
             upstream cad_backend {
                 server 127.0.0.1:8000;
                 keepalive 64;
             }
-            
+
             server {
                 listen 80;
                 server_name _;
                 
-                # Allow large PDF uploads (up to 100MB)
-                client_max_body_size 100M;
-                client_body_timeout 300s;
+                # Large file uploads (2GB max)
+                client_max_body_size 2G;
+                client_body_timeout 7200s;
+                client_body_buffer_size 10M;
+                client_body_temp_path /tmp/nginx_uploads;
+                
+                # Disable request buffering - stream directly to backend
+                proxy_request_buffering off;
+                proxy_buffering off;
+                
+                # Long timeouts for large files
+                proxy_connect_timeout 7200s;
+                proxy_send_timeout 7200s;
+                proxy_read_timeout 7200s;
+                send_timeout 7200s;
+                keepalive_timeout 7200s;
                 
                 # Gzip compression
                 gzip on;
                 gzip_types text/plain text/css application/json application/javascript;
                 
-                # Main application
                 location / {
                     proxy_pass http://cad_backend;
                     proxy_http_version 1.1;
-                    
-                    # Headers for proper forwarding
                     proxy_set_header Host $host;
                     proxy_set_header X-Real-IP $remote_addr;
                     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                     proxy_set_header X-Forwarded-Proto $scheme;
-                    
-                    # Timeouts for long-running requests
-                    proxy_connect_timeout 75s;
-                    proxy_send_timeout 300s;
-                    proxy_read_timeout 300s;
+                    proxy_set_header Connection "";
                 }
                 
-                # WebSocket endpoint - dedicated config for /ws
+                # WebSocket endpoint with long timeouts
                 location /ws {
                     proxy_pass http://cad_backend/ws;
                     proxy_http_version 1.1;
-                    
-                    # Required for WebSocket
                     proxy_set_header Upgrade $http_upgrade;
                     proxy_set_header Connection "upgrade";
-                    
-                    # Headers
                     proxy_set_header Host $host;
                     proxy_set_header X-Real-IP $remote_addr;
-                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto $scheme;
                     
-                    # WebSocket specific timeouts (longer for persistent connections)
-                    proxy_connect_timeout 7d;
-                    proxy_send_timeout 7d;
-                    proxy_read_timeout 7d;
+                    # 24-hour timeout for WebSocket
+                    proxy_read_timeout 86400s;
+                    proxy_send_timeout 86400s;
+                    proxy_connect_timeout 86400s;
                     
                     # Disable buffering for real-time
                     proxy_buffering off;
                     proxy_cache off;
                 }
                 
-                # Health check endpoint
+                # Health check
                 location /health {
                     access_log off;
                     return 200 "OK";
                     add_header Content-Type text/plain;
                 }
             }
-            NGINXEOF
+            NGINXCONF
             
-            # Test and enable Nginx
+            # Remove default config if exists
+            sudo rm -f /etc/nginx/conf.d/default.conf 2>/dev/null || true
+            
+            # Test and restart Nginx
             sudo nginx -t
             sudo systemctl enable nginx
             sudo systemctl restart nginx
@@ -186,13 +229,12 @@ jobs:
             # APP SETUP & DEPLOYMENT
             # ========================================
             
-            # Create app directory if not exists
             mkdir -p /home/ec2-user/cad-material-tracker
             cd /home/ec2-user/cad-material-tracker
             
             # Clone or pull repo
             if [ ! -d ".git" ]; then
-              echo "📥 Cloning repository for the first time..."
+              echo "📥 Cloning repository..."
               git clone https://github.com/abbasghori29/CAD-material-tracker.git .
             else
               echo "📥 Pulling latest code..."
@@ -200,65 +242,65 @@ jobs:
               git reset --hard origin/main
             fi
             
-            # Create virtual environment if not exists
+            # Create virtual environment
             if [ ! -d "venv312" ]; then
-              echo "🔧 Creating Python 3.12 virtual environment..."
+              echo "🔧 Creating Python virtual environment..."
               python3.12 -m venv venv312
             fi
             
-            # Activate venv and install dependencies
+            # Install dependencies
             echo "📦 Installing Python dependencies..."
             source venv312/bin/activate
             pip install --upgrade pip
             pip install -r requirements.txt
             
-            # Create .env file if not exists
-            if [ ! -f ".env" ]; then
-              echo "⚙️ Creating .env file..."
-              cat > .env << ENVEOF
-            ROBOFLOW_API_KEY=${{ secrets.ROBOFLOW_API_KEY }}
-            ROBOFLOW_MODEL_ID=${{ secrets.ROBOFLOW_MODEL_ID }}
-            AUTO_CLEANUP=true
-            ENVEOF
-            fi
+            # ========================================
+            # FIX: Tesseract path in app.py
+            # ========================================
+            
+            # Tesseract path is now auto-detected in app.py
+            # No manual patching needed - code checks common paths + system PATH
             
             # ========================================
-            # SYSTEMD SERVICE (Always running + Auto-restart)
+            # ENVIRONMENT FILE
+            # ========================================
+            
+            echo "⚙️ Creating/Updating .env file..."
+            cat > .env << ENVFILE
+            ROBOFLOW_API_KEY=${{ secrets.ROBOFLOW_API_KEY }}
+            ROBOFLOW_MODEL_ID=${{ secrets.ROBOFLOW_MODEL_ID }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            AUTO_CLEANUP=true
+            ENVFILE
+            
+            # ========================================
+            # SYSTEMD SERVICE (with all environment vars)
             # ========================================
             
             echo "🔄 Configuring systemd service..."
-            sudo tee /etc/systemd/system/cad-tracker.service > /dev/null << 'SERVICEEOF'
+            sudo tee /etc/systemd/system/cad-tracker.service > /dev/null << 'SERVICE'
             [Unit]
             Description=CAD Material Tracker FastAPI Application
             After=network.target nginx.service
             Wants=nginx.service
-            
+
             [Service]
             Type=simple
             User=ec2-user
             Group=ec2-user
             WorkingDirectory=/home/ec2-user/cad-material-tracker
-            Environment="PATH=/home/ec2-user/cad-material-tracker/venv312/bin"
-            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 2
-            
-            # Auto-restart on failure
+            Environment="PATH=/home/ec2-user/cad-material-tracker/venv312/bin:/usr/local/bin:/usr/bin"
+            Environment="TESSDATA_PREFIX=/usr/local/share/tessdata"
+            Environment="LD_LIBRARY_PATH=/usr/local/lib"
+            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1 --timeout-keep-alive 86400
             Restart=always
             RestartSec=5
-            
-            # Restart limits (max 5 restarts in 60 seconds)
-            StartLimitIntervalSec=60
-            StartLimitBurst=5
-            
-            # Logging
-            StandardOutput=journal
-            StandardError=journal
-            SyslogIdentifier=cad-tracker
-            
+
             [Install]
             WantedBy=multi-user.target
-            SERVICEEOF
+            SERVICE
             
-            # Reload and restart services
+            # Reload and restart
             sudo systemctl daemon-reload
             sudo systemctl enable cad-tracker
             sudo systemctl restart cad-tracker
@@ -278,12 +320,16 @@ jobs:
             echo "🌐 App URL: http://${{ secrets.EC2_HOST }}"
             echo "🔌 WebSocket: ws://${{ secrets.EC2_HOST }}/ws"
             echo ""
+            echo "📋 Installed Components:"
+            echo "   - Python 3.12: $(python3.12 --version 2>&1 || echo 'Not found')"
+            echo "   - Tesseract: $(tesseract --version 2>&1 | head -1 || echo 'Not found')"
+            echo "   - Nginx: $(nginx -v 2>&1 || echo 'Not found')"
+            echo ""
+            echo "🔑 API Keys Configured:"
+            echo "   - Roboflow: $([ -n '${{ secrets.ROBOFLOW_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
+            echo "   - OpenAI: $([ -n '${{ secrets.OPENAI_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
+            echo ""
             echo "📊 Service Status:"
-            sudo systemctl status cad-tracker --no-pager || true
+            sudo systemctl status cad-tracker --no-pager -l || true
             echo ""
-            echo "📊 Nginx Status:"
-            sudo systemctl status nginx --no-pager || true
-            echo ""
-            echo "============================================"
-            echo "🎉 App is live and always running!"
             echo "============================================"
