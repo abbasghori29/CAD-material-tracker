@@ -1,0 +1,253 @@
+# CI/CD Pipeline for CAD Material Tracker
+# Fully automated: Push to main → Deployed to EC2
+# No manual SSH required!
+
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  APP_NAME: cad-material-tracker
+  APP_DIR: /home/ec2-user/cad-material-tracker
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup and Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          command_timeout: 30m
+          script: |
+            set -e
+            
+            echo "🚀 Starting deployment..."
+            
+            # ========================================
+            # FIRST-TIME SETUP (runs only if needed)
+            # ========================================
+            
+            # Install Python 3.12 if not installed
+            if ! command -v python3.12 &> /dev/null; then
+              echo "📦 Installing Python 3.12..."
+              sudo dnf install -y python3.12 python3.12-pip python3.12-devel
+            fi
+            
+            # Install Tesseract if not installed
+            if ! command -v tesseract &> /dev/null; then
+              echo "📝 Installing Tesseract OCR..."
+              sudo dnf install -y tesseract
+            fi
+            
+            # Install Git if not installed
+            if ! command -v git &> /dev/null; then
+              echo "📂 Installing Git..."
+              sudo dnf install -y git
+            fi
+            
+            # ========================================
+            # NGINX SETUP WITH WEBSOCKET SUPPORT
+            # ========================================
+            
+            if ! command -v nginx &> /dev/null; then
+              echo "🌐 Installing Nginx..."
+              sudo dnf install -y nginx
+            fi
+            
+            # Always update Nginx config (ensures WebSocket support)
+            echo "🌐 Configuring Nginx with WebSocket support..."
+            sudo tee /etc/nginx/conf.d/cad-tracker.conf > /dev/null << 'NGINXEOF'
+            # CAD Material Tracker - Nginx Configuration
+            # Supports: HTTP, WebSocket (ws/wss), Large file uploads
+            
+            upstream cad_backend {
+                server 127.0.0.1:8000;
+                keepalive 64;
+            }
+            
+            server {
+                listen 80;
+                server_name _;
+                
+                # Allow large PDF uploads (up to 100MB)
+                client_max_body_size 100M;
+                client_body_timeout 300s;
+                
+                # Gzip compression
+                gzip on;
+                gzip_types text/plain text/css application/json application/javascript;
+                
+                # Main application
+                location / {
+                    proxy_pass http://cad_backend;
+                    proxy_http_version 1.1;
+                    
+                    # Headers for proper forwarding
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    
+                    # Timeouts for long-running requests
+                    proxy_connect_timeout 75s;
+                    proxy_send_timeout 300s;
+                    proxy_read_timeout 300s;
+                }
+                
+                # WebSocket endpoint - dedicated config for /ws
+                location /ws {
+                    proxy_pass http://cad_backend/ws;
+                    proxy_http_version 1.1;
+                    
+                    # Required for WebSocket
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                    
+                    # Headers
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    
+                    # WebSocket specific timeouts (longer for persistent connections)
+                    proxy_connect_timeout 7d;
+                    proxy_send_timeout 7d;
+                    proxy_read_timeout 7d;
+                    
+                    # Disable buffering for real-time
+                    proxy_buffering off;
+                    proxy_cache off;
+                }
+                
+                # Health check endpoint
+                location /health {
+                    access_log off;
+                    return 200 "OK";
+                    add_header Content-Type text/plain;
+                }
+            }
+            NGINXEOF
+            
+            # Test and enable Nginx
+            sudo nginx -t
+            sudo systemctl enable nginx
+            sudo systemctl restart nginx
+            
+            # ========================================
+            # APP SETUP & DEPLOYMENT
+            # ========================================
+            
+            # Create app directory if not exists
+            mkdir -p /home/ec2-user/cad-material-tracker
+            cd /home/ec2-user/cad-material-tracker
+            
+            # Clone or pull repo
+            if [ ! -d ".git" ]; then
+              echo "📥 Cloning repository for the first time..."
+              git clone https://github.com/abbasghori29/CAD-material-tracker.git .
+            else
+              echo "📥 Pulling latest code..."
+              git fetch origin
+              git reset --hard origin/main
+            fi
+            
+            # Create virtual environment if not exists
+            if [ ! -d "venv312" ]; then
+              echo "🔧 Creating Python 3.12 virtual environment..."
+              python3.12 -m venv venv312
+            fi
+            
+            # Activate venv and install dependencies
+            echo "📦 Installing Python dependencies..."
+            source venv312/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+            
+            # Create .env file if not exists
+            if [ ! -f ".env" ]; then
+              echo "⚙️ Creating .env file..."
+              cat > .env << ENVEOF
+            ROBOFLOW_API_KEY=${{ secrets.ROBOFLOW_API_KEY }}
+            ROBOFLOW_MODEL_ID=${{ secrets.ROBOFLOW_MODEL_ID }}
+            AUTO_CLEANUP=true
+            ENVEOF
+            fi
+            
+            # ========================================
+            # SYSTEMD SERVICE (Always running + Auto-restart)
+            # ========================================
+            
+            echo "🔄 Configuring systemd service..."
+            sudo tee /etc/systemd/system/cad-tracker.service > /dev/null << 'SERVICEEOF'
+            [Unit]
+            Description=CAD Material Tracker FastAPI Application
+            After=network.target nginx.service
+            Wants=nginx.service
+            
+            [Service]
+            Type=simple
+            User=ec2-user
+            Group=ec2-user
+            WorkingDirectory=/home/ec2-user/cad-material-tracker
+            Environment="PATH=/home/ec2-user/cad-material-tracker/venv312/bin"
+            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 2
+            
+            # Auto-restart on failure
+            Restart=always
+            RestartSec=5
+            
+            # Restart limits (max 5 restarts in 60 seconds)
+            StartLimitIntervalSec=60
+            StartLimitBurst=5
+            
+            # Logging
+            StandardOutput=journal
+            StandardError=journal
+            SyslogIdentifier=cad-tracker
+            
+            [Install]
+            WantedBy=multi-user.target
+            SERVICEEOF
+            
+            # Reload and restart services
+            sudo systemctl daemon-reload
+            sudo systemctl enable cad-tracker
+            sudo systemctl restart cad-tracker
+            
+            # Wait for app to start
+            sleep 5
+            
+            # ========================================
+            # VERIFICATION
+            # ========================================
+            
+            echo ""
+            echo "============================================"
+            echo "✅ DEPLOYMENT COMPLETE!"
+            echo "============================================"
+            echo ""
+            echo "🌐 App URL: http://${{ secrets.EC2_HOST }}"
+            echo "🔌 WebSocket: ws://${{ secrets.EC2_HOST }}/ws"
+            echo ""
+            echo "📊 Service Status:"
+            sudo systemctl status cad-tracker --no-pager || true
+            echo ""
+            echo "📊 Nginx Status:"
+            sudo systemctl status nginx --no-pager || true
+            echo ""
+            echo "============================================"
+            echo "🎉 App is live and always running!"
+            echo "============================================"

@@ -32,6 +32,7 @@ import tempfile
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "output_images"
 RESULTS_FOLDER = "results"
+AUTO_CLEANUP = os.getenv("AUTO_CLEANUP", "false").lower() == "true"  # Set AUTO_CLEANUP=true in .env to enable
 
 # Ensure folders exist
 for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER, RESULTS_FOLDER, "static", "templates"]:
@@ -189,6 +190,29 @@ def ocr_image(img: Image.Image) -> str:
         return ""
 
 
+def cleanup_temp_files():
+    """Clean up temporary files (PDFs and images) but keep CSV results"""
+    import shutil
+    from pathlib import Path
+    
+    cleanup_folders = [
+        "uploads",
+        "output_images",
+        "predicted_images",
+        "predicted_images_web",
+        "predicted_images2",
+    ]
+    
+    for folder in cleanup_folders:
+        folder_path = Path(folder)
+        if folder_path.exists():
+            try:
+                shutil.rmtree(folder_path)
+                os.makedirs(folder_path, exist_ok=True)  # Recreate empty folder
+            except Exception as e:
+                print(f"Cleanup error for {folder}: {e}")
+
+
 def get_sheet_number(page) -> str:
     """Extract sheet number"""
     try:
@@ -313,6 +337,16 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
             
     except Exception as e:
         await broadcast({"type": "error", "message": str(e)})
+    
+    # Auto-cleanup AFTER PDF is closed (outside the 'with' block)
+    if AUTO_CLEANUP:
+        await asyncio.sleep(0.5)  # Small delay to ensure file handles are released
+        cleanup_temp_files()
+        await broadcast({
+            "type": "log",
+            "level": "info",
+            "message": "Auto-cleanup: Temporary files deleted (CSV results kept)"
+        })
 
 
 # === ROUTES ===
@@ -371,6 +405,16 @@ async def download_csv():
     if os.path.exists(csv_path):
         return FileResponse(csv_path, filename="material_tracker_results.csv", media_type="text/csv")
     return {"error": "No results available"}
+
+
+@app.post("/cleanup")
+async def cleanup_endpoint():
+    """Manually trigger cleanup of temporary files"""
+    try:
+        cleanup_temp_files()
+        return {"success": True, "message": "Cleanup completed. Temporary files deleted (CSV results kept)."}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 if __name__ == "__main__":

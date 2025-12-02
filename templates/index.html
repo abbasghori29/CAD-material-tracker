@@ -805,10 +805,61 @@
             document.getElementById('drawings-container').innerHTML = '';
             document.getElementById('logs-container').innerHTML = '';
             
-            // Connect WebSocket
-            ws = new WebSocket(`ws://${window.location.host}/ws`);
+            // Connect WebSocket with fallback (wss/ws)
+            function connectWebSocket() {
+                const isHttps = window.location.protocol === 'https:';
+                const primaryProtocol = isHttps ? 'wss:' : 'ws:';
+                const fallbackProtocol = isHttps ? 'ws:' : 'wss:';
+
+                function openWithProtocol(protocol, isFallback = false) {
+                    try {
+                        ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+                        ws.onopen = () => {
+                            const startVal = document.getElementById('start-page').value;
+                            const endVal = document.getElementById('end-page').value;
+                            ws.send(JSON.stringify({
+                                action: 'process',
+                                pdf_path: uploadedFilePath,
+                                start_page: startVal ? parseInt(startVal) : 1,
+                                end_page: endVal ? parseInt(endVal) : totalPages
+                            }));
+                        };
+
+                        ws.onmessage = (event) => {
+                            const data = JSON.parse(event.data);
+                            handleMessage(data);
+                        };
+
+                        ws.onerror = (error) => {
+                            addLog('error', `WebSocket error on ${protocol} (${isFallback ? 'fallback' : 'primary'})`);
+                        };
+
+                        ws.onclose = (event) => {
+                            if (!isFallback) {
+                                // Try fallback protocol once
+                                addLog('warning', `WebSocket closed on ${protocol}, trying fallback protocol...`);
+                                openWithProtocol(fallbackProtocol, true);
+                            } else {
+                                addLog('info', 'WebSocket connection closed');
+                            }
+                        };
+                    } catch (e) {
+                        if (!isFallback) {
+                            addLog('warning', `WebSocket failed on ${protocol}, trying fallback protocol...`);
+                            openWithProtocol(fallbackProtocol, true);
+                        } else {
+                            addLog('error', 'WebSocket failed on both protocols');
+                        }
+                    }
+                }
+
+                openWithProtocol(primaryProtocol, false);
+            }
+
+            connectWebSocket();
             
-            ws.onopen = () => {
+            /*ws.onopen = () => {
                 const startVal = document.getElementById('start-page').value;
                 const endVal = document.getElementById('end-page').value;
                 ws.send(JSON.stringify({
@@ -817,15 +868,7 @@
                     start_page: startVal ? parseInt(startVal) : 1,
                     end_page: endVal ? parseInt(endVal) : totalPages
                 }));
-            };
-            
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                handleMessage(data);
-            };
-            
-            ws.onerror = (error) => addLog('error', 'WebSocket error');
-            ws.onclose = () => addLog('info', 'Connection closed');
+            };*/
         }
 
         function handleMessage(data) {
@@ -903,6 +946,12 @@
                     
                     if (data.results && data.results.length > 0) {
                         showResults(data.results);
+                        
+                        // Auto-scroll to results table when work is done
+                        const resultsPanel = document.getElementById('results-panel');
+                        if (resultsPanel) {
+                            resultsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
                     }
                     break;
                     
