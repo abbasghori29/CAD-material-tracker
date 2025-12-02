@@ -49,7 +49,43 @@ jobs:
             # Install Tesseract if not installed
             if ! command -v tesseract &> /dev/null; then
               echo "📝 Installing Tesseract OCR..."
-              sudo dnf install -y tesseract
+              
+              # Amazon Linux 2023 - Install EPEL repository first
+              sudo dnf install -y epel-release || sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm || true
+              
+              # Install Tesseract from EPEL
+              sudo dnf install -y tesseract tesseract-langpack-eng || {
+                echo "📝 EPEL method failed, building from source..."
+                
+                # Install build dependencies
+                sudo dnf groupinstall -y "Development Tools"
+                sudo dnf install -y autoconf automake libtool gettext libjpeg-turbo-devel libpng-devel giflib-devel freetype-devel wget
+                
+                # Install Leptonica (required dependency)
+                cd /tmp
+                wget -q http://www.leptonica.org/source/leptonica-1.82.0.tar.gz
+                tar -xzf leptonica-1.82.0.tar.gz
+                cd leptonica-1.82.0
+                ./configure --quiet && make -j4 && sudo make install
+                
+                # Install Tesseract
+                cd /tmp
+                wget -q https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.3.0.tar.gz
+                tar -xzf 5.3.0.tar.gz
+                cd tesseract-5.3.0
+                ./autogen.sh
+                ./configure --quiet && make -j4 && sudo make install
+                sudo ldconfig
+                
+                # Download English language data
+                sudo mkdir -p /usr/local/share/tessdata
+                sudo wget -q -O /usr/local/share/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
+                
+                cd /home/ec2-user
+              }
+              
+              # Verify installation
+              tesseract --version || echo "⚠️ Tesseract installation may have issues"
             fi
             
             # Install Git if not installed
