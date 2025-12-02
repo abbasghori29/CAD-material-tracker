@@ -805,61 +805,13 @@
             document.getElementById('drawings-container').innerHTML = '';
             document.getElementById('logs-container').innerHTML = '';
             
-            // Connect WebSocket with fallback (wss/ws)
-            function connectWebSocket() {
-                const isHttps = window.location.protocol === 'https:';
-                const primaryProtocol = isHttps ? 'wss:' : 'ws:';
-                const fallbackProtocol = isHttps ? 'ws:' : 'wss:';
+            // Connect WebSocket
+            let processingComplete = false;
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
 
-                function openWithProtocol(protocol, isFallback = false) {
-                    try {
-                        ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-
-                        ws.onopen = () => {
-                            const startVal = document.getElementById('start-page').value;
-                            const endVal = document.getElementById('end-page').value;
-                            ws.send(JSON.stringify({
-                                action: 'process',
-                                pdf_path: uploadedFilePath,
-                                start_page: startVal ? parseInt(startVal) : 1,
-                                end_page: endVal ? parseInt(endVal) : totalPages
-                            }));
-                        };
-
-                        ws.onmessage = (event) => {
-                            const data = JSON.parse(event.data);
-                            handleMessage(data);
-                        };
-
-                        ws.onerror = (error) => {
-                            addLog('error', `WebSocket error on ${protocol} (${isFallback ? 'fallback' : 'primary'})`);
-                        };
-
-                        ws.onclose = (event) => {
-                            if (!isFallback) {
-                                // Try fallback protocol once
-                                addLog('warning', `WebSocket closed on ${protocol}, trying fallback protocol...`);
-                                openWithProtocol(fallbackProtocol, true);
-                            } else {
-                                addLog('info', 'WebSocket connection closed');
-                            }
-                        };
-                    } catch (e) {
-                        if (!isFallback) {
-                            addLog('warning', `WebSocket failed on ${protocol}, trying fallback protocol...`);
-                            openWithProtocol(fallbackProtocol, true);
-                        } else {
-                            addLog('error', 'WebSocket failed on both protocols');
-                        }
-                    }
-                }
-
-                openWithProtocol(primaryProtocol, false);
-            }
-
-            connectWebSocket();
-            
-            /*ws.onopen = () => {
+            ws.onopen = () => {
+                addLog('info', 'Connected to server');
                 const startVal = document.getElementById('start-page').value;
                 const endVal = document.getElementById('end-page').value;
                 ws.send(JSON.stringify({
@@ -868,7 +820,28 @@
                     start_page: startVal ? parseInt(startVal) : 1,
                     end_page: endVal ? parseInt(endVal) : totalPages
                 }));
-            };*/
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'complete') {
+                    processingComplete = true;
+                }
+                handleMessage(data);
+            };
+
+            ws.onerror = (error) => {
+                addLog('error', 'WebSocket error - check connection');
+            };
+
+            ws.onclose = (event) => {
+                if (processingComplete) {
+                    addLog('success', 'Processing finished successfully');
+                } else {
+                    addLog('warning', 'Connection closed - processing may be incomplete');
+                }
+            };
+            
         }
 
         function handleMessage(data) {

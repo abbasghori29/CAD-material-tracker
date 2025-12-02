@@ -67,7 +67,14 @@ except ImportError:
 # Tesseract setup
 try:
     import pytesseract
-    for path in [r"C:\Program Files\Tesseract-OCR\tesseract.exe", r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]:
+    # Check Windows paths first, then Linux paths
+    tesseract_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # Windows
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",  # Windows x86
+        "/usr/local/bin/tesseract",  # Linux (compiled from source)
+        "/usr/bin/tesseract",  # Linux (package manager)
+    ]
+    for path in tesseract_paths:
         if os.path.exists(path):
             pytesseract.pytesseract.tesseract_cmd = path
             break
