@@ -897,15 +897,16 @@
                 ws.onmessage = (event) => {
                     const data = JSON.parse(event.data);
                     
-                    // Track pong/heartbeat for connection health
+                    // Track ALL messages for connection health
+                    lastPongReceived = Date.now();
+                    
+                    // Track pong/heartbeat silently
                     if (data.type === 'pong' || data.type === 'heartbeat') {
-                        lastPongReceived = Date.now();
                         return;  // Don't process further
                     }
                     
                     // Track progress silently
                     if (data.type === 'progress') {
-                        lastPongReceived = Date.now();
                         return;
                     }
                     
