@@ -169,13 +169,17 @@ async def broadcast(message: dict):
     for connection in active_connections:
         try:
             await connection.send_json(message)
-        except Exception:
+            # Force flush
+            await asyncio.sleep(0)
+        except Exception as e:
+            print(f"[BROADCAST] Failed to send to client: {type(e).__name__}")
             disconnected.append(connection)
     
     # Clean up disconnected clients
     for conn in disconnected:
         if conn in active_connections:
             active_connections.remove(conn)
+            print(f"[BROADCAST] Removed disconnected client")
 
 
 def detect_drawings_on_page(page, page_num: int):
@@ -641,30 +645,37 @@ async def websocket_endpoint(websocket: WebSocket):
             count += 1
             try:
                 await websocket.send_json({"type": "heartbeat", "n": count})
+                if count % 10 == 0:  # Log every 10 seconds
+                    print(f"[WS-HEARTBEAT] Sent {count} heartbeats, connection alive")
             except Exception as e:
-                print(f"[WS] Heartbeat failed: {e}")
+                print(f"[WS-HEARTBEAT] FAILED at count {count}: {type(e).__name__}: {e}")
                 break  # Connection is dead, stop heartbeat
     
     try:
         # Start heartbeat IMMEDIATELY
         heartbeat_task = asyncio.create_task(heartbeat())
+        print(f"[WS] Heartbeat task created and started")
         
         # NO TIMEOUT - wait forever for messages
         while True:
             data = await websocket.receive_json()  # No timeout, wait forever
+            print(f"[WS] Received message: {data.get('action', 'unknown')}")
             
             if data.get("action") == "ping":
                 await websocket.send_json({"type": "pong"})
+                print(f"[WS] Sent pong response")
             
             elif data.get("action") == "process":
                 pdf_path = data.get("pdf_path")
                 start_page = data.get("start_page", 1)
                 end_page = data.get("end_page", 10)
+                print(f"[WS] Starting processing task for {pdf_path}, pages {start_page}-{end_page}")
                 
                 # Run processing as background task
                 processing_task = asyncio.create_task(
                     process_pdf_realtime(pdf_path, start_page, end_page)
                 )
+                print(f"[WS] Processing task created and running in background")
                 
     except WebSocketDisconnect as e:
         print(f"[WS] Client disconnected: code={e.code if hasattr(e, 'code') else 'unknown'}")

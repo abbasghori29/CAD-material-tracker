@@ -297,9 +297,12 @@ jobs:
             Environment="PATH=/home/ec2-user/cad-material-tracker/venv312/bin:/usr/local/bin:/usr/bin"
             Environment="TESSDATA_PREFIX=/usr/local/share/tessdata"
             Environment="LD_LIBRARY_PATH=/usr/local/lib"
-            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1
+            Environment="PYTHONUNBUFFERED=1"
+            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/python -u -m uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1 --log-level debug --timeout-keep-alive 0 --timeout-graceful-shutdown 0
             Restart=always
             RestartSec=5
+            StandardOutput=journal
+            StandardError=journal
 
             [Install]
             WantedBy=multi-user.target
