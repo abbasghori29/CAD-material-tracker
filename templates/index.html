@@ -779,6 +779,13 @@
         let totalPages = 0;
         let currentDrawings = [];
         let stats = { pages: 0, drawings: 0, tags: 0 };
+        
+        // Cleanup any lingering WebSocket connections on page load
+        window.addEventListener('beforeunload', function() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, 'Page refresh');
+            }
+        });
 
         // File upload handlers
         const dropzone = document.getElementById('dropzone');
@@ -927,9 +934,11 @@
                     if (connectionMonitor) clearInterval(connectionMonitor);
                     
                     if (processingComplete) {
-                        addLog('success', 'Processing finished successfully');
+                        addLog('success', '✅ Job complete! Refresh page to start a new analysis.');
+                    } else if (event.code === 1000) {
+                        // Normal close
+                        addLog('info', 'Connection closed. Refresh to start a new job.');
                     } else {
-                        // Connection closed unexpectedly - this should NOT happen now
                         addLog('error', 'Connection closed unexpectedly. Please refresh and try again.');
                     }
                 };

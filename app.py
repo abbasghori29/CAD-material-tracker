@@ -615,6 +615,18 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                 "results": results
             })
             
+            # Wait a moment for client to receive the complete message
+            await asyncio.sleep(2)
+            
+            # Auto-close WebSocket after job completes
+            for connection in list(active_connections):
+                try:
+                    await connection.close(code=1000, reason="Job completed successfully")
+                    print(f"[WS] Auto-closed connection after job completion")
+                except:
+                    pass
+            active_connections.clear()
+            
     except Exception as e:
         print(f"[PROCESS] FATAL ERROR: {type(e).__name__}: {e}")
         import traceback
@@ -636,12 +648,17 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {
+    response = templates.TemplateResponse("index.html", {
         "request": request,
         "roboflow_available": ROBOFLOW_AVAILABLE,
         "openai_available": OPENAI_AVAILABLE,
         "tag_count": len(TAG_DESCRIPTIONS)
     })
+    # Prevent browser caching to avoid connection issues on refresh
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.post("/upload")
@@ -729,10 +746,22 @@ async def websocket_endpoint(websocket: WebSocket):
         import traceback
         traceback.print_exc()
     finally:
+        # Aggressive cleanup on disconnect
         if websocket in active_connections:
             active_connections.remove(websocket)
         if heartbeat_task:
             heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except:
+                pass
+        if processing_task and not processing_task.done():
+            # Let processing finish in background but don't block
+            pass
+        
+        # Force garbage collection on disconnect
+        gc.collect()
+        
         print(f"[WS] Connection closed and cleaned up")
 
 
