@@ -413,7 +413,8 @@ def get_sheet_number(page) -> str:
 
 
 async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
-    """Process PDF with real-time WebSocket updates - OPTIMIZED WITH BATCH OpenAI CALLS"""
+    """Process PDF with real-time WebSocket updates"""
+    print(f"[PROCESS] Starting PDF processing: {pdf_path}")
     results = []
     target_tags = list(TAG_DESCRIPTIONS.keys())
     
@@ -450,7 +451,7 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
             
             for idx, page_num in enumerate(range(start_page, min(end_page + 1, len(pdf.pages) + 1))):
                 page = pdf.pages[page_num - 1]
-                sheet = get_sheet_number(page)
+                sheet = await asyncio.to_thread(get_sheet_number, page)
                 
                 # Send page start
                 await broadcast({
@@ -461,8 +462,17 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                     "total": total
                 })
                 
-                # Detect drawings
-                full_page_img, cropped_drawings, drawing_data = detect_drawings_on_page(page, page_num)
+                # Detect drawings - run in thread to not block heartbeat
+                await broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
+                print(f"[PROCESS] Starting detection for page {page_num}")
+                try:
+                    full_page_img, cropped_drawings, drawing_data = await asyncio.to_thread(
+                        detect_drawings_on_page, page, page_num
+                    )
+                    print(f"[PROCESS] Detection complete: {len(cropped_drawings) if cropped_drawings else 0} drawings")
+                except Exception as e:
+                    print(f"[PROCESS] Detection ERROR: {type(e).__name__}: {e}")
+                    full_page_img, cropped_drawings, drawing_data = None, [], []
                 
                 if full_page_img:
                     # Send full page preview immediately
@@ -501,12 +511,24 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         # Step 1: Get location from OpenAI (sequential)
                         location_desc = ""
                         if OPENAI_AVAILABLE:
-                            await broadcast({"type": "log", "level": "info", "message": f"Extracting location..."})
-                            location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
+                            try:
+                                await broadcast({"type": "log", "level": "info", "message": f"Extracting location..."})
+                                print(f"[PROCESS] Starting OpenAI call for drawing {i+1}")
+                                location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
+                                print(f"[PROCESS] OpenAI call complete: {location_desc[:50] if location_desc else 'empty'}")
+                            except Exception as e:
+                                print(f"[PROCESS] OpenAI ERROR: {type(e).__name__}: {e}")
+                                await broadcast({"type": "log", "level": "warning", "message": f"Location extraction failed"})
                         
                         # Step 2: Run OCR (sequential)
-                        await broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
-                        text = await asyncio.to_thread(ocr_image, cropped_img)
+                        try:
+                            await broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
+                            print(f"[PROCESS] Starting OCR for drawing {i+1}")
+                            text = await asyncio.to_thread(ocr_image, cropped_img)
+                            print(f"[PROCESS] OCR complete: {len(text)} chars")
+                        except Exception as e:
+                            print(f"[PROCESS] OCR ERROR: {type(e).__name__}: {e}")
+                            text = ""
                         
                         # Process tags
                         matched_tags, drawing_results = process_ocr_and_tags(
@@ -559,6 +581,9 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
             })
             
     except Exception as e:
+        print(f"[PROCESS] FATAL ERROR: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         await broadcast({"type": "error", "message": str(e)})
     
     # Auto-cleanup AFTER PDF is closed (outside the 'with' block)
@@ -609,19 +634,16 @@ async def websocket_endpoint(websocket: WebSocket):
     processing_task = None
     
     async def heartbeat():
-        """Send heartbeat every 2 seconds - NEVER stops"""
+        """Send heartbeat every 1 second - keeps connection alive"""
         count = 0
         while True:
+            await asyncio.sleep(1)
+            count += 1
             try:
-                await asyncio.sleep(2)
-                count += 1
-                await websocket.send_json({
-                    "type": "heartbeat", 
-                    "ts": datetime.now().isoformat(),
-                    "n": count
-                })
-            except:
-                pass  # Ignore ALL errors, keep trying
+                await websocket.send_json({"type": "heartbeat", "n": count})
+            except Exception as e:
+                print(f"[WS] Heartbeat failed: {e}")
+                break  # Connection is dead, stop heartbeat
     
     try:
         # Start heartbeat IMMEDIATELY
@@ -644,16 +666,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     process_pdf_realtime(pdf_path, start_page, end_page)
                 )
                 
-    except WebSocketDisconnect:
-        print(f"[WS] Client disconnected")
+    except WebSocketDisconnect as e:
+        print(f"[WS] Client disconnected: code={e.code if hasattr(e, 'code') else 'unknown'}")
     except Exception as e:
-        print(f"[WS] Error: {e}")
+        print(f"[WS] UNEXPECTED ERROR: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         if websocket in active_connections:
             active_connections.remove(websocket)
         if heartbeat_task:
             heartbeat_task.cancel()
-        print(f"[WS] Cleanup done")
+        print(f"[WS] Connection closed and cleaned up")
 
 
 @app.get("/download")
