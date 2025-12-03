@@ -874,7 +874,7 @@
                     if (clientPingInterval) clearInterval(clientPingInterval);
                     if (connectionMonitor) clearInterval(connectionMonitor);
                     
-                    // Send ping every 10 seconds (server now responds properly)
+                    // Send ping every 5 seconds to keep connection alive
                     clientPingInterval = setInterval(() => {
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             try {
@@ -883,7 +883,7 @@
                                 console.error('Ping failed:', e);
                             }
                         }
-                    }, 10000);
+                    }, 5000);
                     
                     // Monitor connection health - if no pong in 60s, connection might be dead
                     connectionMonitor = setInterval(() => {

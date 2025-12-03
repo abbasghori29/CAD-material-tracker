@@ -151,7 +151,7 @@ jobs:
             sudo tee /etc/nginx/conf.d/cad-tracker.conf > /dev/null << 'NGINXCONF'
             upstream cad_backend {
                 server 127.0.0.1:8000;
-                keepalive 64;
+                keepalive 1000;
             }
 
             server {
@@ -173,7 +173,10 @@ jobs:
                 proxy_send_timeout 7200s;
                 proxy_read_timeout 7200s;
                 send_timeout 7200s;
-                keepalive_timeout 7200s;
+                keepalive_timeout 0;
+                
+                # Disable reset on close
+                reset_timedout_connection off;
                 
                 # Gzip compression
                 gzip on;
@@ -189,7 +192,7 @@ jobs:
                     proxy_set_header Connection "";
                 }
                 
-                # WebSocket endpoint - very long timeouts
+                # WebSocket endpoint
                 location /ws {
                     proxy_pass http://cad_backend/ws;
                     proxy_http_version 1.1;
@@ -197,20 +200,21 @@ jobs:
                     proxy_set_header Connection "upgrade";
                     proxy_set_header Host $host;
                     proxy_set_header X-Real-IP $remote_addr;
-                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto $scheme;
                     
-                    # Very long timeouts (1 week)
-                    proxy_read_timeout 604800s;
-                    proxy_send_timeout 604800s;
-                    proxy_connect_timeout 604800s;
+                    # Very long timeouts - 7 days
+                    proxy_read_timeout 604800;
+                    proxy_send_timeout 604800;
+                    proxy_connect_timeout 300;
                     
-                    # Disable buffering
+                    # Disable all buffering for real-time
                     proxy_buffering off;
                     proxy_cache off;
+                    proxy_request_buffering off;
+                    chunked_transfer_encoding on;
                     
-                    # Keep alive
-                    proxy_socket_keepalive on;
+                    # TCP optimizations for WebSocket
+                    tcp_nodelay on;
+                    tcp_nopush off;
                 }
                 
                 # Health check

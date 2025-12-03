@@ -638,18 +638,23 @@ async def websocket_endpoint(websocket: WebSocket):
     processing_task = None
     
     async def heartbeat():
-        """Send heartbeat every 1 second - keeps connection alive"""
+        """Send heartbeat every 0.5 seconds - aggressive keepalive"""
         count = 0
+        errors = 0
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)  # Every 500ms
             count += 1
             try:
                 await websocket.send_json({"type": "heartbeat", "n": count})
-                if count % 10 == 0:  # Log every 10 seconds
-                    print(f"[WS-HEARTBEAT] Sent {count} heartbeats, connection alive")
+                errors = 0  # Reset error count on success
+                if count % 20 == 0:  # Log every 10 seconds (20 * 0.5s)
+                    print(f"[WS-HEARTBEAT] Sent {count} heartbeats")
             except Exception as e:
-                print(f"[WS-HEARTBEAT] FAILED at count {count}: {type(e).__name__}: {e}")
-                break  # Connection is dead, stop heartbeat
+                errors += 1
+                print(f"[WS-HEARTBEAT] FAILED #{errors} at count {count}: {type(e).__name__}")
+                if errors >= 3:  # Stop after 3 consecutive failures
+                    print(f"[WS-HEARTBEAT] Stopping after {errors} failures")
+                    break
     
     try:
         # Start heartbeat IMMEDIATELY
