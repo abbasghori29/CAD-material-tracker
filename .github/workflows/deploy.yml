@@ -58,6 +58,19 @@ jobs:
               sudo sysctl -p || true
             fi
             
+            # Add swap space (8GB) to prevent OOM on large PDFs
+            if [ ! -f /swapfile ]; then
+              echo "💾 Creating 8GB swap space..."
+              sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
+              sudo chmod 600 /swapfile
+              sudo mkswap /swapfile
+              sudo swapon /swapfile
+              echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+              echo "✅ Swap enabled"
+            else
+              sudo swapon /swapfile 2>/dev/null || true
+            fi
+            
             # ========================================
             # INSTALL DEPENDENCIES
             # ========================================

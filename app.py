@@ -17,6 +17,7 @@ import base64
 from io import BytesIO
 from datetime import datetime
 from dotenv import load_dotenv
+import gc  # Garbage collection for memory cleanup
 
 # Load environment variables
 load_dotenv()
@@ -584,6 +585,21 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         "level": "warning",
                         "message": f"No drawings detected on page {page_num}"
                     })
+                
+                # CRITICAL: Release memory after each page to prevent OOM
+                del page
+                if full_page_img:
+                    del full_page_img
+                if cropped_drawings:
+                    del cropped_drawings
+                if drawing_data:
+                    del drawing_data
+                
+                # Force garbage collection to free memory immediately
+                gc.collect()
+                
+                # Small delay to allow GC to complete
+                await asyncio.sleep(0.1)
             
             # Save results
             csv_path = os.path.join(RESULTS_FOLDER, "results.csv")
