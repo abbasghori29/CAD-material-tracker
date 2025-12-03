@@ -32,6 +32,18 @@ class DrawingLocationInfo(BaseModel):
         description="The location identifier/description found in the drawing title block or header. Examples: 'E1 1/8 RCP - LEVEL 3 PART B', 'C3 KITCHEN E1 ELEVATION 2', 'B1 SECTION AT EAST OF GARAGE - NS'. Return empty string if not found."
     )
 
+# Shared prompt for location extraction
+LOCATION_EXTRACTION_PROMPT = """Read the drawing title or location label from this CAD drawing image.
+
+Look in the title block, header, or label area.
+
+Return exactly what you see written - could be:
+- With prefix: "E1 ELEVATION WEST", "A101 FLOOR PLAN", "S2 FRAMING"
+- Without prefix: "KITCHEN ELEVATION", "LEVEL 3 PLAN", "SECTION AT GARAGE"
+
+Just read what's there. Don't make up text that isn't visible.
+If no title/location is visible, return empty string."""
+
 # OpenAI setup for vision
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_AVAILABLE = bool(OPENAI_API_KEY)
@@ -42,9 +54,11 @@ if OPENAI_AVAILABLE:
         VISION_LLM = ChatOpenAI(
             model="gpt-4o",
             temperature=0,
-            api_key=OPENAI_API_KEY
+            api_key=OPENAI_API_KEY,
+            timeout=120,  # 120 second timeout per request (large images need more time)
+            max_retries=3  # Retry failed requests up to 3 times
         )
-        print(f"OpenAI Vision enabled with gpt-4o model")
+        print(f"OpenAI Vision enabled with gpt-4o model (120s timeout)")
     except Exception as e:
         print(f"WARNING: Failed to initialize OpenAI: {e}")
         OPENAI_AVAILABLE = False
@@ -150,12 +164,18 @@ def image_to_base64(img: Image.Image, format: str = "JPEG", quality: int = 85) -
 
 
 async def broadcast(message: dict):
-    """Send message to all connected WebSocket clients"""
+    """Send message to all connected WebSocket clients - robust version"""
+    disconnected = []
     for connection in active_connections:
         try:
             await connection.send_json(message)
-        except:
-            pass
+        except Exception:
+            disconnected.append(connection)
+    
+    # Clean up disconnected clients
+    for conn in disconnected:
+        if conn in active_connections:
+            active_connections.remove(conn)
 
 
 def detect_drawings_on_page(page, page_num: int):
@@ -164,8 +184,18 @@ def detect_drawings_on_page(page, page_num: int):
         return None, [], None
     
     try:
-        # High resolution for full page preview
-        img_original = page.to_image(resolution=150).original.convert("RGB")
+        # Use adaptive resolution based on page size to avoid memory issues
+        # Large CAD drawings can be huge - cap resolution to prevent memory overflow
+        page_width, page_height = page.width, page.height
+        max_dimension = max(page_width, page_height)
+        
+        # For very large pages (>24 inches), use lower resolution
+        if max_dimension > 1728:  # ~24 inches at 72 dpi
+            resolution = 100  # Lower resolution for huge drawings
+        else:
+            resolution = 150  # Standard resolution
+        
+        img_original = page.to_image(resolution=resolution).original.convert("RGB")
         img_original = ImageOps.exif_transpose(img_original)
         orig_width, orig_height = img_original.size
         
@@ -244,81 +274,106 @@ def ocr_image(img: Image.Image) -> str:
 
 
 def extract_location_description(img: Image.Image) -> str:
-    """Extract location description from CAD drawing using OpenAI Vision."""
+    """Extract location description from CAD drawing using OpenAI Vision (single image)."""
     if not OPENAI_AVAILABLE or VISION_LLM is None:
         return ""
     
     try:
         # Convert image to base64
         buffered = BytesIO()
-        # Ensure RGB mode for JPEG
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        img.save(buffered, format='JPEG', quality=85)
+        # Reduce quality for faster upload
+        img.save(buffered, format='JPEG', quality=70)
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
-        # Create structured LLM for extraction
         structured_llm = VISION_LLM.with_structured_output(DrawingLocationInfo)
         
-        # Create the message with strong prompt
         message = HumanMessage(
             content=[
-                {
-                    "type": "text",
-                    "text": """You are an expert at reading architectural and engineering CAD drawings.
-
-TASK: Extract the COMPLETE LOCATION DESCRIPTION from this CAD drawing image.
-
-The location description is typically found in:
-- The drawing title block (usually bottom right corner or top)
-- The drawing header or label area
-- Near the drawing number/sheet reference
-
-CRITICAL: Location descriptions usually START with a DRAWING IDENTIFIER like:
-- E1, E2, E3... (Elevations)
-- A1, A2, A3... (Architectural)
-- S1, S2, S3... (Structural)
-- C1, C2, C3... (Civil)
-- B1, B2, B3... (Building sections)
-- P1, P2, P3... (Plumbing)
-- M1, M2, M3... (Mechanical)
-
-FULL EXAMPLES of location descriptions:
-- "E3 1/8 ELEVATION COURTYARD WEST" (E3 is the drawing ID, must be included!)
-- "E1 1/8 RCP - LEVEL 3 PART B"
-- "C3 KITCHEN E1 ELEVATION 2"
-- "B1 SECTION AT EAST OF GARAGE - NS"
-- "A101 - GROUND FLOOR PLAN - EAST WING"
-- "S2 STRUCTURAL FRAMING PLAN LEVEL 2"
-- "3 DETAIL AT PARAPET"
-
-IMPORTANT RULES:
-1. ALWAYS include the drawing identifier prefix (E3, A1, B2, S1, etc.) if present
-2. Include scale indicators like "1/8", "1/4", "3/16" if shown
-3. Include drawing type keywords: RCP, PLAN, ELEVATION, SECTION, DETAIL, FRAMING
-4. Include location keywords: LEVEL, FLOOR, COURTYARD, EAST, WEST, NORTH, SOUTH
-5. Include any grid references, room names, or area identifiers
-6. Combine ALL related text elements that form the complete location description
-7. Return the FULL location description exactly as shown, preserving the format
-8. If no clear location description is visible, return an empty string
-
-Extract the COMPLETE location description from this CAD drawing:"""
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-                },
+                {"type": "text", "text": LOCATION_EXTRACTION_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
             ]
         )
         
-        # Invoke the model
         result = structured_llm.invoke([message])
-        
         return result.location_description.strip() if result.location_description else ""
         
     except Exception as e:
         print(f"Location extraction error: {e}")
         return ""
+
+
+class BatchLocationInfo(BaseModel):
+    """Batch extraction of locations from multiple drawings."""
+    locations: List[str] = Field(
+        description="List of location descriptions for each drawing, in order. Use empty string if not found."
+    )
+
+
+def extract_locations_batch(images: List[Image.Image]) -> List[str]:
+    """Extract location descriptions from MULTIPLE drawings in a SINGLE API call."""
+    if not OPENAI_AVAILABLE or VISION_LLM is None:
+        return [""] * len(images)
+    
+    if len(images) == 0:
+        return []
+    
+    # Single image? Use regular function
+    if len(images) == 1:
+        return [extract_location_description(images[0])]
+    
+    try:
+        # Convert all images to base64
+        image_contents = []
+        for i, img in enumerate(images):
+            buffered = BytesIO()
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            # Reduce quality for faster upload
+            img.save(buffered, format='JPEG', quality=60)
+            base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            
+            image_contents.append({
+                "type": "text", 
+                "text": f"[DRAWING {i + 1}]"
+            })
+            image_contents.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+            })
+        
+        # Create batch prompt - STRICT
+        batch_prompt = f"""TASK: Extract the location description from EACH of the {len(images)} CAD drawings below.
+
+{LOCATION_EXTRACTION_PROMPT}
+
+IMPORTANT FOR BATCH PROCESSING:
+- Return EXACTLY {len(images)} results, one per drawing
+- For EACH drawing, ONLY return text you can ACTUALLY READ in that specific image
+- If a drawing has no visible location text, return "" (empty string) for that position
+- DO NOT make up or guess identifiers - return "" if not clearly visible
+- It is OKAY to return mostly empty strings if locations are not visible"""
+
+        # Build message with all images
+        content = [{"type": "text", "text": batch_prompt}] + image_contents
+        
+        structured_llm = VISION_LLM.with_structured_output(BatchLocationInfo)
+        message = HumanMessage(content=content)
+        
+        result = structured_llm.invoke([message])
+        
+        # Ensure we have the right number of results
+        locations = result.locations if result.locations else []
+        while len(locations) < len(images):
+            locations.append("")
+        
+        return locations[:len(images)]
+        
+    except Exception as e:
+        print(f"Batch location extraction error: {e}")
+        # Fallback: return empty strings
+        return [""] * len(images)
 
 
 def cleanup_temp_files():
@@ -361,11 +416,34 @@ def get_sheet_number(page) -> str:
 
 
 async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
-    """Process PDF with real-time WebSocket updates"""
+    """Process PDF with real-time WebSocket updates - OPTIMIZED WITH BATCH OpenAI CALLS"""
     results = []
     target_tags = list(TAG_DESCRIPTIONS.keys())
     
     await broadcast({"type": "start", "message": "Starting extraction..."})
+    
+    def process_ocr_and_tags(text, conf, sheet, page_num, location_desc):
+        """Process OCR text to find tags (runs in thread)"""
+        found_tags = TAG_PATTERN.findall(text)
+        matched_tags = []
+        drawing_results = []
+        
+        for tag in found_tags:
+            tag_upper = tag.upper()
+            for t in [tag_upper, tag_upper.replace('O', '0'), tag_upper.replace('0', 'O')]:
+                if t in target_tags:
+                    matched_tags.append(t)
+                    drawing_results.append({
+                        "material": t,
+                        "description": TAG_DESCRIPTIONS.get(t, "Unknown"),
+                        "sheet": sheet,
+                        "page": page_num,
+                        "confidence": f"{conf:.0%}",
+                        "location": location_desc
+                    })
+                    break
+        
+        return matched_tags, drawing_results
     
     try:
         with pdfplumber.open(pdf_path) as pdf:
@@ -399,85 +477,82 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         "drawing_count": len(cropped_drawings)
                     })
                 
-                # Send each cropped drawing one by one
-                for i, crop_data in enumerate(cropped_drawings):
-                    cropped_img = crop_data["image"]
-                    conf = crop_data["confidence"]
+                if cropped_drawings:
+                    # Send ALL drawing previews immediately
+                    for i, crop_data in enumerate(cropped_drawings):
+                        await broadcast({
+                            "type": "drawing",
+                            "index": i + 1,
+                            "total_drawings": len(cropped_drawings),
+                            "image": image_to_base64(crop_data["image"], quality=75),
+                            "confidence": f"{crop_data['confidence']:.0%}",
+                            "bbox": crop_data["bbox"]
+                        })
                     
-                    # Send cropped drawing preview
-                    await broadcast({
-                        "type": "drawing",
-                        "index": i + 1,
-                        "total_drawings": len(cropped_drawings),
-                        "image": image_to_base64(cropped_img, quality=75),
-                        "confidence": f"{conf:.0%}",
-                        "bbox": crop_data["bbox"]
-                    })
-                    
-                    # Run Location Extraction (OpenAI) and OCR (Tesseract) in PARALLEL
+                    num_drawings = len(cropped_drawings)
                     await broadcast({
                         "type": "log",
                         "level": "info",
-                        "message": f"Processing drawing {i + 1} (Location + OCR in parallel)..."
+                        "message": f"Processing {num_drawings} drawings (1 batch API call + parallel OCR)..."
                     })
                     
-                    # Run both tasks in parallel using thread pool
-                    async def get_location():
-                        if OPENAI_AVAILABLE:
-                            return await asyncio.to_thread(extract_location_description, cropped_img)
-                        return ""
+                    # === OPTIMIZED: Single batch OpenAI call + parallel OCR ===
                     
-                    async def get_ocr():
-                        return await asyncio.to_thread(ocr_image, cropped_img)
+                    # Get all images
+                    images = [crop_data["image"] for crop_data in cropped_drawings]
                     
-                    # Execute in parallel and wait for both results
-                    location_desc, text = await asyncio.gather(get_location(), get_ocr())
+                    # Run BATCH location extraction (1 API call for ALL images) and ALL OCR in parallel
+                    async def batch_locations():
+                        return await asyncio.to_thread(extract_locations_batch, images)
                     
-                    if location_desc:
+                    async def all_ocr():
+                        tasks = [asyncio.to_thread(ocr_image, img) for img in images]
+                        return await asyncio.gather(*tasks)
+                    
+                    # Execute both in parallel
+                    locations, ocr_texts = await asyncio.gather(batch_locations(), all_ocr())
+                    
+                    # Process results
+                    for i, crop_data in enumerate(cropped_drawings):
+                        location_desc = locations[i] if i < len(locations) else ""
+                        text = ocr_texts[i] if i < len(ocr_texts) else ""
+                        conf = crop_data["confidence"]
+                        
+                        # Process tags
+                        matched_tags, drawing_results = process_ocr_and_tags(
+                            text, conf, sheet, page_num, location_desc
+                        )
+                        
+                        if location_desc:
+                            await broadcast({
+                                "type": "log",
+                                "level": "success",
+                                "message": f"Drawing {i + 1} → {location_desc}"
+                            })
+                        
+                        # Send OCR result with location
                         await broadcast({
-                            "type": "log",
-                            "level": "success",
-                            "message": f"Location: {location_desc}"
+                            "type": "ocr_result",
+                            "drawing_index": i + 1,
+                            "tags_found": matched_tags,
+                            "text_preview": text[:100] if text else "No text found",
+                            "location": location_desc
                         })
+                        
+                        # Add to results
+                        results.extend(drawing_results)
                     
-                    # Process OCR results for tags
-                    found_tags = TAG_PATTERN.findall(text)
-                    
-                    matched_tags = []
-                    for tag in found_tags:
-                        tag_upper = tag.upper()
-                        for t in [tag_upper, tag_upper.replace('O', '0'), tag_upper.replace('0', 'O')]:
-                            if t in target_tags:
-                                matched_tags.append(t)
-                                results.append({
-                                    "material": t,
-                                    "description": TAG_DESCRIPTIONS.get(t, "Unknown"),
-                                    "sheet": sheet,
-                                    "page": page_num,
-                                    "confidence": f"{conf:.0%}",
-                                    "location": location_desc
-                                })
-                                break
-                    
-                    # Send OCR result with location
                     await broadcast({
-                        "type": "ocr_result",
-                        "drawing_index": i + 1,
-                        "tags_found": matched_tags,
-                        "text_preview": text[:100] if text else "No text found",
-                        "location": location_desc
+                        "type": "log",
+                        "level": "success",
+                        "message": f"Page {page_num} done - {num_drawings} drawings in 1 API call!"
                     })
-                    
-                    await asyncio.sleep(0.05)  # Small delay for smooth UI
-                
-                if not cropped_drawings:
+                else:
                     await broadcast({
                         "type": "log",
                         "level": "warning",
                         "message": f"No drawings detected on page {page_num}"
                     })
-                
-                await asyncio.sleep(0.1)
             
             # Save results
             csv_path = os.path.join(RESULTS_FOLDER, "results.csv")
@@ -534,27 +609,71 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates"""
+    """WebSocket endpoint for real-time updates - connection never drops"""
     await websocket.accept()
     active_connections.append(websocket)
     
-    try:
+    # Background tasks
+    heartbeat_task = None
+    processing_task = None
+    
+    async def heartbeat():
+        """Send periodic heartbeat every 5 seconds"""
         while True:
-            data = await websocket.receive_json()
+            try:
+                await asyncio.sleep(5)
+                await websocket.send_json({"type": "heartbeat", "timestamp": datetime.now().isoformat()})
+            except Exception:
+                break
+    
+    try:
+        # Start heartbeat in background
+        heartbeat_task = asyncio.create_task(heartbeat())
+        
+        while True:
+            # Use wait_for with timeout so we can check connection status
+            try:
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # No message received in 30s, just continue (heartbeat keeps connection alive)
+                continue
             
-            if data.get("action") == "process":
+            if data.get("action") == "ping":
+                # Respond to client ping IMMEDIATELY
+                await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
+            
+            elif data.get("action") == "process":
                 pdf_path = data.get("pdf_path")
                 start_page = data.get("start_page", 1)
                 end_page = data.get("end_page", 10)
                 
-                await process_pdf_realtime(pdf_path, start_page, end_page)
+                # Run processing as BACKGROUND TASK so WebSocket loop stays responsive
+                # This allows ping/pong to work while processing runs
+                processing_task = asyncio.create_task(
+                    process_pdf_realtime(pdf_path, start_page, end_page)
+                )
                 
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
     except Exception as e:
         print(f"WebSocket error: {e}")
         if websocket in active_connections:
             active_connections.remove(websocket)
+    finally:
+        # Cancel background tasks
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        if processing_task and not processing_task.done():
+            processing_task.cancel()
+            try:
+                await processing_task
+            except asyncio.CancelledError:
+                pass
 
 
 @app.get("/download")
@@ -578,4 +697,11 @@ async def cleanup_endpoint():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        timeout_keep_alive=300,  # 5 minute keep-alive timeout
+        ws_ping_interval=20,     # Send WebSocket ping every 20 seconds
+        ws_ping_timeout=60       # Wait 60 seconds for pong before closing
+    )

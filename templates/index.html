@@ -837,43 +837,104 @@
             document.getElementById('drawings-container').innerHTML = '';
             document.getElementById('logs-container').innerHTML = '';
             
-            // Connect WebSocket
+            // Connection state
             let processingComplete = false;
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
-
-            ws.onopen = () => {
-                addLog('info', 'Connected to server');
-                const startVal = document.getElementById('start-page').value;
-                const endVal = document.getElementById('end-page').value;
-                ws.send(JSON.stringify({
-                    action: 'process',
-                    pdf_path: uploadedFilePath,
-                    start_page: startVal ? parseInt(startVal) : 1,
-                    end_page: endVal ? parseInt(endVal) : totalPages
-                }));
-            };
-
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.type === 'complete') {
-                    processingComplete = true;
-                }
-                handleMessage(data);
-            };
-
-            ws.onerror = (error) => {
-                addLog('error', 'WebSocket error - check connection');
-            };
-
-            ws.onclose = (event) => {
-                if (processingComplete) {
-                    addLog('success', 'Processing finished successfully');
-                } else {
-                    addLog('warning', 'Connection closed - processing may be incomplete');
-                }
+            let processingStarted = false;
+            let lastPongReceived = Date.now();
+            let clientPingInterval = null;
+            let connectionMonitor = null;
+            
+            // Store processing params
+            const startVal = document.getElementById('start-page').value;
+            const endVal = document.getElementById('end-page').value;
+            const processParams = {
+                action: 'process',
+                pdf_path: uploadedFilePath,
+                start_page: startVal ? parseInt(startVal) : 1,
+                end_page: endVal ? parseInt(endVal) : totalPages
             };
             
+            function connectWebSocket() {
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+
+                ws.onopen = () => {
+                    lastPongReceived = Date.now();
+                    
+                    if (!processingStarted) {
+                        addLog('info', 'Connected to server');
+                        // Send process command only on first connect
+                        ws.send(JSON.stringify(processParams));
+                        processingStarted = true;
+                    } else {
+                        addLog('success', 'Reconnected to server');
+                    }
+                    
+                    // Clear any existing intervals
+                    if (clientPingInterval) clearInterval(clientPingInterval);
+                    if (connectionMonitor) clearInterval(connectionMonitor);
+                    
+                    // Send ping every 10 seconds (server now responds properly)
+                    clientPingInterval = setInterval(() => {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            try {
+                                ws.send(JSON.stringify({ action: 'ping' }));
+                            } catch (e) {
+                                console.error('Ping failed:', e);
+                            }
+                        }
+                    }, 10000);
+                    
+                    // Monitor connection health - if no pong in 60s, connection might be dead
+                    connectionMonitor = setInterval(() => {
+                        const timeSinceLastPong = Date.now() - lastPongReceived;
+                        if (timeSinceLastPong > 60000 && !processingComplete) {
+                            addLog('info', 'Still processing... please wait');
+                        }
+                    }, 30000);
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    
+                    // Track pong/heartbeat for connection health
+                    if (data.type === 'pong' || data.type === 'heartbeat') {
+                        lastPongReceived = Date.now();
+                        return;  // Don't process further
+                    }
+                    
+                    // Track progress silently
+                    if (data.type === 'progress') {
+                        lastPongReceived = Date.now();
+                        return;
+                    }
+                    
+                    if (data.type === 'complete') {
+                        processingComplete = true;
+                    }
+                    
+                    handleMessage(data);
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                };
+
+                ws.onclose = (event) => {
+                    // Clear intervals
+                    if (clientPingInterval) clearInterval(clientPingInterval);
+                    if (connectionMonitor) clearInterval(connectionMonitor);
+                    
+                    if (processingComplete) {
+                        addLog('success', 'Processing finished successfully');
+                    } else {
+                        // Connection closed unexpectedly - this should NOT happen now
+                        addLog('error', 'Connection closed unexpectedly. Please refresh and try again.');
+                    }
+                };
+            }
+            
+            connectWebSocket();
         }
 
         function handleMessage(data) {
