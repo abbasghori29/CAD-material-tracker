@@ -189,7 +189,7 @@ jobs:
                     proxy_set_header Connection "";
                 }
                 
-                # WebSocket endpoint with long timeouts
+                # WebSocket endpoint - NO TIMEOUTS
                 location /ws {
                     proxy_pass http://cad_backend/ws;
                     proxy_http_version 1.1;
@@ -200,16 +200,16 @@ jobs:
                     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                     proxy_set_header X-Forwarded-Proto $scheme;
                     
-                    # 24-hour timeout for WebSocket
-                    proxy_read_timeout 86400s;
-                    proxy_send_timeout 86400s;
-                    proxy_connect_timeout 86400s;
+                    # NO TIMEOUT - 0 means infinite in nginx
+                    proxy_read_timeout 0;
+                    proxy_send_timeout 0;
+                    proxy_connect_timeout 0;
                     
-                    # Disable buffering for real-time WebSocket
+                    # Disable buffering
                     proxy_buffering off;
                     proxy_cache off;
                     
-                    # Keep connection alive
+                    # Keep alive
                     proxy_socket_keepalive on;
                 }
                 
@@ -297,11 +297,11 @@ jobs:
             Environment="PATH=/home/ec2-user/cad-material-tracker/venv312/bin:/usr/local/bin:/usr/bin"
             Environment="TESSDATA_PREFIX=/usr/local/share/tessdata"
             Environment="LD_LIBRARY_PATH=/usr/local/lib"
-            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1 --timeout-keep-alive 86400 --ws-ping-interval 20 --ws-ping-timeout 120
+            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1 --timeout-keep-alive 0 --ws-ping-interval 0 --ws-ping-timeout 0
             Restart=always
             RestartSec=5
-            # Prevent systemd from killing long-running processes
-            TimeoutStopSec=300
+            TimeoutStopSec=infinity
+            TimeoutStartSec=infinity
 
             [Install]
             WantedBy=multi-user.target

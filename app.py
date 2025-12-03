@@ -55,10 +55,10 @@ if OPENAI_AVAILABLE:
             model="gpt-4o",
             temperature=0,
             api_key=OPENAI_API_KEY,
-            timeout=120,  # 120 second timeout per request (large images need more time)
-            max_retries=3  # Retry failed requests up to 3 times
+            timeout=60,
+            max_retries=2
         )
-        print(f"OpenAI Vision enabled with gpt-4o model (120s timeout)")
+        print(f"OpenAI Vision enabled with gpt-4o model")
     except Exception as e:
         print(f"WARNING: Failed to initialize OpenAI: {e}")
         OPENAI_AVAILABLE = False
@@ -184,16 +184,14 @@ def detect_drawings_on_page(page, page_num: int):
         return None, [], None
     
     try:
-        # Use adaptive resolution based on page size to avoid memory issues
-        # Large CAD drawings can be huge - cap resolution to prevent memory overflow
+        # Use adaptive resolution based on page size
         page_width, page_height = page.width, page.height
         max_dimension = max(page_width, page_height)
         
-        # For very large pages (>24 inches), use lower resolution
         if max_dimension > 1728:  # ~24 inches at 72 dpi
-            resolution = 100  # Lower resolution for huge drawings
+            resolution = 100
         else:
-            resolution = 150  # Standard resolution
+            resolution = 150
         
         img_original = page.to_image(resolution=resolution).original.convert("RGB")
         img_original = ImageOps.exif_transpose(img_original)
@@ -283,8 +281,7 @@ def extract_location_description(img: Image.Image) -> str:
         buffered = BytesIO()
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        # Reduce quality for faster upload
-        img.save(buffered, format='JPEG', quality=70)
+        img.save(buffered, format='JPEG', quality=85)
         base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
         
         structured_llm = VISION_LLM.with_structured_output(DrawingLocationInfo)
@@ -300,8 +297,8 @@ def extract_location_description(img: Image.Image) -> str:
         return result.location_description.strip() if result.location_description else ""
         
     except Exception as e:
-        print(f"Location extraction error: {e}")
-        return ""
+        print(f"[OpenAI] Location extraction error: {type(e).__name__}: {e}")
+        return ""  # Return empty on any error - don't block processing
 
 
 class BatchLocationInfo(BaseModel):
@@ -478,66 +475,38 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                     })
                 
                 if cropped_drawings:
-                    # Send ALL drawing previews immediately
+                    num_drawings = len(cropped_drawings)
+                    
+                    # Process each drawing ONE BY ONE - NO PARALLEL
                     for i, crop_data in enumerate(cropped_drawings):
+                        cropped_img = crop_data["image"]
+                        conf = crop_data["confidence"]
+                        
+                        # Send drawing preview
                         await broadcast({
                             "type": "drawing",
                             "index": i + 1,
-                            "total_drawings": len(cropped_drawings),
-                            "image": image_to_base64(crop_data["image"], quality=75),
-                            "confidence": f"{crop_data['confidence']:.0%}",
+                            "total_drawings": num_drawings,
+                            "image": image_to_base64(cropped_img, quality=85),
+                            "confidence": f"{conf:.0%}",
                             "bbox": crop_data["bbox"]
                         })
-                    
-                    num_drawings = len(cropped_drawings)
-                    await broadcast({
-                        "type": "log",
-                        "level": "info",
-                        "message": f"Processing {num_drawings} drawings..."
-                    })
-                    
-                    # Get all images
-                    images = [crop_data["image"] for crop_data in cropped_drawings]
-                    
-                    # Process with keep-alive messages for deployed environments
-                    async def batch_locations_with_keepalive():
-                        """Run batch location extraction with periodic keep-alive messages"""
-                        import concurrent.futures
                         
-                        # Start the blocking call in a thread
-                        loop = asyncio.get_event_loop()
-                        with concurrent.futures.ThreadPoolExecutor() as pool:
-                            future = loop.run_in_executor(pool, extract_locations_batch, images)
-                            
-                            # While waiting, send keep-alive messages every 10 seconds
-                            while not future.done():
-                                await broadcast({"type": "heartbeat", "status": "processing_locations"})
-                                try:
-                                    return await asyncio.wait_for(asyncio.shield(future), timeout=10.0)
-                                except asyncio.TimeoutError:
-                                    await broadcast({
-                                        "type": "log",
-                                        "level": "info", 
-                                        "message": "AI analyzing drawings..."
-                                    })
-                            return await future
-                    
-                    async def all_ocr_with_keepalive():
-                        """Run all OCR in parallel"""
-                        tasks = [asyncio.to_thread(ocr_image, img) for img in images]
-                        return await asyncio.gather(*tasks)
-                    
-                    # Execute both in parallel
-                    locations, ocr_texts = await asyncio.gather(
-                        batch_locations_with_keepalive(), 
-                        all_ocr_with_keepalive()
-                    )
-                    
-                    # Process results
-                    for i, crop_data in enumerate(cropped_drawings):
-                        location_desc = locations[i] if i < len(locations) else ""
-                        text = ocr_texts[i] if i < len(ocr_texts) else ""
-                        conf = crop_data["confidence"]
+                        await broadcast({
+                            "type": "log",
+                            "level": "info",
+                            "message": f"Analyzing drawing {i + 1}/{num_drawings}..."
+                        })
+                        
+                        # Step 1: Get location from OpenAI (sequential)
+                        location_desc = ""
+                        if OPENAI_AVAILABLE:
+                            await broadcast({"type": "log", "level": "info", "message": f"Extracting location..."})
+                            location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
+                        
+                        # Step 2: Run OCR (sequential)
+                        await broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
+                        text = await asyncio.to_thread(ocr_image, cropped_img)
                         
                         # Process tags
                         matched_tags, drawing_results = process_ocr_and_tags(
@@ -566,7 +535,7 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                     await broadcast({
                         "type": "log",
                         "level": "success",
-                        "message": f"Page {page_num} done - {num_drawings} drawings in 1 API call!"
+                        "message": f"Page {page_num} complete - {num_drawings} drawings processed"
                     })
                 else:
                     await broadcast({
@@ -630,80 +599,61 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates - connection never drops"""
+    """WebSocket endpoint - NEVER times out, NEVER closes"""
     await websocket.accept()
     active_connections.append(websocket)
-    print(f"[WS] New connection accepted")
+    print(f"[WS] Connection accepted")
     
     # Background tasks
     heartbeat_task = None
     processing_task = None
     
     async def heartbeat():
-        """Send heartbeat every 3 seconds - keeps connection alive through proxies"""
+        """Send heartbeat every 2 seconds - NEVER stops"""
         count = 0
         while True:
             try:
-                await asyncio.sleep(3)  # Every 3 seconds
+                await asyncio.sleep(2)
                 count += 1
                 await websocket.send_json({
                     "type": "heartbeat", 
-                    "timestamp": datetime.now().isoformat(),
-                    "count": count
+                    "ts": datetime.now().isoformat(),
+                    "n": count
                 })
-            except Exception as e:
-                print(f"[WS] Heartbeat stopped: {e}")
-                break
+            except:
+                pass  # Ignore ALL errors, keep trying
     
     try:
         # Start heartbeat IMMEDIATELY
         heartbeat_task = asyncio.create_task(heartbeat())
-        print(f"[WS] Heartbeat task started")
         
+        # NO TIMEOUT - wait forever for messages
         while True:
-            # Use wait_for with timeout so we can check connection status
-            try:
-                data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
-            except asyncio.TimeoutError:
-                # No message received in 30s, just continue (heartbeat keeps connection alive)
-                continue
+            data = await websocket.receive_json()  # No timeout, wait forever
             
             if data.get("action") == "ping":
-                # Respond to client ping IMMEDIATELY
-                await websocket.send_json({"type": "pong", "timestamp": datetime.now().isoformat()})
+                await websocket.send_json({"type": "pong"})
             
             elif data.get("action") == "process":
                 pdf_path = data.get("pdf_path")
                 start_page = data.get("start_page", 1)
                 end_page = data.get("end_page", 10)
                 
-                # Run processing as BACKGROUND TASK so WebSocket loop stays responsive
-                # This allows ping/pong to work while processing runs
+                # Run processing as background task
                 processing_task = asyncio.create_task(
                     process_pdf_realtime(pdf_path, start_page, end_page)
                 )
                 
     except WebSocketDisconnect:
-        print(f"[WS] Client disconnected normally")
-        if websocket in active_connections:
-            active_connections.remove(websocket)
+        print(f"[WS] Client disconnected")
     except Exception as e:
-        print(f"[WS] WebSocket error: {type(e).__name__}: {e}")
+        print(f"[WS] Error: {e}")
+    finally:
         if websocket in active_connections:
             active_connections.remove(websocket)
-    finally:
-        print(f"[WS] Cleaning up connection")
-        # Cancel background tasks
         if heartbeat_task:
             heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
-        if processing_task and not processing_task.done():
-            # Don't cancel processing, let it complete
-            print(f"[WS] Processing task still running, not cancelling")
-        print(f"[WS] Connection cleanup complete")
+        print(f"[WS] Cleanup done")
 
 
 @app.get("/download")
@@ -731,7 +681,7 @@ if __name__ == "__main__":
         app, 
         host="0.0.0.0", 
         port=8000,
-        timeout_keep_alive=86400,  # 24 hour keep-alive timeout
-        ws_ping_interval=20,       # Send WebSocket ping every 20 seconds
-        ws_ping_timeout=120        # Wait 120 seconds for pong before closing
+        timeout_keep_alive=0,   # No timeout
+        ws_ping_interval=None,  # Disable uvicorn ping (we have our own heartbeat)
+        ws_ping_timeout=None    # No timeout
     )
