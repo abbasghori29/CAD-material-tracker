@@ -493,24 +493,45 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                     await broadcast({
                         "type": "log",
                         "level": "info",
-                        "message": f"Processing {num_drawings} drawings (1 batch API call + parallel OCR)..."
+                        "message": f"Processing {num_drawings} drawings..."
                     })
-                    
-                    # === OPTIMIZED: Single batch OpenAI call + parallel OCR ===
                     
                     # Get all images
                     images = [crop_data["image"] for crop_data in cropped_drawings]
                     
-                    # Run BATCH location extraction (1 API call for ALL images) and ALL OCR in parallel
-                    async def batch_locations():
-                        return await asyncio.to_thread(extract_locations_batch, images)
+                    # Process with keep-alive messages for deployed environments
+                    async def batch_locations_with_keepalive():
+                        """Run batch location extraction with periodic keep-alive messages"""
+                        import concurrent.futures
+                        
+                        # Start the blocking call in a thread
+                        loop = asyncio.get_event_loop()
+                        with concurrent.futures.ThreadPoolExecutor() as pool:
+                            future = loop.run_in_executor(pool, extract_locations_batch, images)
+                            
+                            # While waiting, send keep-alive messages every 10 seconds
+                            while not future.done():
+                                await broadcast({"type": "heartbeat", "status": "processing_locations"})
+                                try:
+                                    return await asyncio.wait_for(asyncio.shield(future), timeout=10.0)
+                                except asyncio.TimeoutError:
+                                    await broadcast({
+                                        "type": "log",
+                                        "level": "info", 
+                                        "message": "AI analyzing drawings..."
+                                    })
+                            return await future
                     
-                    async def all_ocr():
+                    async def all_ocr_with_keepalive():
+                        """Run all OCR in parallel"""
                         tasks = [asyncio.to_thread(ocr_image, img) for img in images]
                         return await asyncio.gather(*tasks)
                     
                     # Execute both in parallel
-                    locations, ocr_texts = await asyncio.gather(batch_locations(), all_ocr())
+                    locations, ocr_texts = await asyncio.gather(
+                        batch_locations_with_keepalive(), 
+                        all_ocr_with_keepalive()
+                    )
                     
                     # Process results
                     for i, crop_data in enumerate(cropped_drawings):
@@ -612,23 +633,32 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates - connection never drops"""
     await websocket.accept()
     active_connections.append(websocket)
+    print(f"[WS] New connection accepted")
     
     # Background tasks
     heartbeat_task = None
     processing_task = None
     
     async def heartbeat():
-        """Send periodic heartbeat every 5 seconds"""
+        """Send heartbeat every 3 seconds - keeps connection alive through proxies"""
+        count = 0
         while True:
             try:
-                await asyncio.sleep(5)
-                await websocket.send_json({"type": "heartbeat", "timestamp": datetime.now().isoformat()})
-            except Exception:
+                await asyncio.sleep(3)  # Every 3 seconds
+                count += 1
+                await websocket.send_json({
+                    "type": "heartbeat", 
+                    "timestamp": datetime.now().isoformat(),
+                    "count": count
+                })
+            except Exception as e:
+                print(f"[WS] Heartbeat stopped: {e}")
                 break
     
     try:
-        # Start heartbeat in background
+        # Start heartbeat IMMEDIATELY
         heartbeat_task = asyncio.create_task(heartbeat())
+        print(f"[WS] Heartbeat task started")
         
         while True:
             # Use wait_for with timeout so we can check connection status
@@ -654,13 +684,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 
     except WebSocketDisconnect:
+        print(f"[WS] Client disconnected normally")
         if websocket in active_connections:
             active_connections.remove(websocket)
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"[WS] WebSocket error: {type(e).__name__}: {e}")
         if websocket in active_connections:
             active_connections.remove(websocket)
     finally:
+        print(f"[WS] Cleaning up connection")
         # Cancel background tasks
         if heartbeat_task:
             heartbeat_task.cancel()
@@ -669,11 +701,9 @@ async def websocket_endpoint(websocket: WebSocket):
             except asyncio.CancelledError:
                 pass
         if processing_task and not processing_task.done():
-            processing_task.cancel()
-            try:
-                await processing_task
-            except asyncio.CancelledError:
-                pass
+            # Don't cancel processing, let it complete
+            print(f"[WS] Processing task still running, not cancelling")
+        print(f"[WS] Connection cleanup complete")
 
 
 @app.get("/download")
@@ -701,7 +731,7 @@ if __name__ == "__main__":
         app, 
         host="0.0.0.0", 
         port=8000,
-        timeout_keep_alive=300,  # 5 minute keep-alive timeout
-        ws_ping_interval=20,     # Send WebSocket ping every 20 seconds
-        ws_ping_timeout=60       # Wait 60 seconds for pong before closing
+        timeout_keep_alive=86400,  # 24 hour keep-alive timeout
+        ws_ping_interval=20,       # Send WebSocket ping every 20 seconds
+        ws_ping_timeout=120        # Wait 120 seconds for pong before closing
     )
