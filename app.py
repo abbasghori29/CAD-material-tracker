@@ -164,22 +164,25 @@ def image_to_base64(img: Image.Image, format: str = "JPEG", quality: int = 85) -
 
 
 async def broadcast(message: dict):
-    """Send message to all connected WebSocket clients - robust version"""
+    """Send message to all connected WebSocket clients - yields control to event loop"""
+    # Yield control BEFORE sending (allows heartbeat to run)
+    await asyncio.sleep(0)
+    
     disconnected = []
     for connection in active_connections:
         try:
             await connection.send_json(message)
-            # Force flush
-            await asyncio.sleep(0)
         except Exception as e:
-            print(f"[BROADCAST] Failed to send to client: {type(e).__name__}")
+            print(f"[BROADCAST] Failed: {type(e).__name__}")
             disconnected.append(connection)
     
     # Clean up disconnected clients
     for conn in disconnected:
         if conn in active_connections:
             active_connections.remove(conn)
-            print(f"[BROADCAST] Removed disconnected client")
+    
+    # Yield control AFTER sending (allows heartbeat to run)
+    await asyncio.sleep(0)
 
 
 def detect_drawings_on_page(page, page_num: int):
@@ -454,7 +457,16 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
             await broadcast({"type": "info", "total_pages": total})
             
             for idx, page_num in enumerate(range(start_page, min(end_page + 1, len(pdf.pages) + 1))):
+                # Yield control to event loop (allows heartbeat to send)
+                await asyncio.sleep(0)
+                
+                print(f"[PROCESS] Loading page {page_num}")
                 page = pdf.pages[page_num - 1]
+                print(f"[PROCESS] Page {page_num} loaded")
+                
+                # Yield again after page load
+                await asyncio.sleep(0)
+                
                 sheet = await asyncio.to_thread(get_sheet_number, page)
                 
                 # Send page start
@@ -465,6 +477,9 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                     "progress": idx + 1,
                     "total": total
                 })
+                
+                # Another yield
+                await asyncio.sleep(0)
                 
                 # Detect drawings - run in thread to not block heartbeat
                 await broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
@@ -557,12 +572,18 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         
                         # Add to results
                         results.extend(drawing_results)
+                        
+                        # Yield after each drawing
+                        await asyncio.sleep(0)
                     
                     await broadcast({
                         "type": "log",
                         "level": "success",
                         "message": f"Page {page_num} complete - {num_drawings} drawings processed"
                     })
+                    
+                    # Yield after page complete
+                    await asyncio.sleep(0)
                 else:
                     await broadcast({
                         "type": "log",
