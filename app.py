@@ -72,13 +72,21 @@ class JobState:
     
     async def broadcast(self, message: dict):
         """Broadcast message to all subscribers (no storage - we don't replay)"""
+        if len(self.subscribers) == 0:
+            print(f"[JOB-{self.job_id}] ⚠️ Broadcast skipped - no subscribers. Message type: {message.get('type')}")
+            return
+        
         # Broadcast to all connected clients
         dead_sockets = []
+        msg_type = message.get('type', 'unknown')
+        print(f"[JOB-{self.job_id}] Broadcasting '{msg_type}' to {len(self.subscribers)} subscriber(s)")
+        
         for ws in self.subscribers[:]:  # Copy list to avoid modification during iteration
             try:
                 await ws.send_json(message)
+                print(f"[JOB-{self.job_id}] ✅ Sent '{msg_type}' successfully")
             except Exception as e:
-                print(f"[JOB-{self.job_id}] Failed to send to subscriber: {e}")
+                print(f"[JOB-{self.job_id}] ❌ Failed to send '{msg_type}' to subscriber: {type(e).__name__}: {e}")
                 dead_sockets.append(ws)
         
         # Remove dead sockets
@@ -980,8 +988,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 current_job = job
                 
-                # Subscribe this WebSocket to the job
+                # Subscribe this WebSocket to the job FIRST
                 job.add_subscriber(websocket)
+                print(f"[WS] Subscribed WebSocket to job {job.job_id}")
+                
+                # Small delay to ensure WebSocket is ready
+                await asyncio.sleep(0.1)
                 
                 # Send job ID to client
                 await websocket.send_json({
@@ -989,13 +1001,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     "job_id": job.job_id,
                     "message": f"Job {job.job_id} created"
                 })
-                
-                print(f"[WS] Created job {job.job_id}")
+                print(f"[WS] Sent job_created message to client")
                 
                 # Start job in background (independent of WebSocket)
+                # Job will now broadcast to the subscribed WebSocket
                 task = asyncio.create_task(process_pdf_with_job(job))
                 JOB_TASKS[job.job_id] = task
-                print(f"[WS] Job {job.job_id} started in background")
+                print(f"[WS] Job {job.job_id} started in background with {len(job.subscribers)} subscriber(s)")
             
             elif action == "subscribe":
                 # SUBSCRIBE TO EXISTING JOB (reconnect scenario)

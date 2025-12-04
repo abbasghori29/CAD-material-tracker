@@ -915,6 +915,9 @@
                 ws.onmessage = (event) => {
                     const data = JSON.parse(event.data);
                     
+                    // DEBUG: Log ALL received messages
+                    console.log('[WS] Received message:', data.type, data);
+                    
                     // Track ALL messages for connection health
                     lastPongReceived = Date.now();
                     
