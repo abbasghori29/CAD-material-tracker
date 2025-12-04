@@ -1103,8 +1103,9 @@
                     break;
                     
                 case 'full_page':
+                    // Use image URL instead of base64 (prevents connection drops)
                     document.getElementById('full-page-preview').innerHTML = 
-                        `<img src="data:image/jpeg;base64,${data.image}" alt="Page ${data.page}">`;
+                        `<img src="${data.image_url}" alt="Page ${data.page}">`;
                     document.getElementById('drawing-count').textContent = `${data.drawing_count} drawings`;
                     addLog('success', `Found ${data.drawing_count} drawings on page ${data.page}`);
                     break;
@@ -1113,6 +1114,7 @@
                     stats.drawings++;
                     updateStats();
                     
+                    // Use image URL instead of base64 (prevents connection drops)
                     const drawingHtml = `
                         <div class="drawing-card active" id="drawing-${data.index}">
                             <div class="drawing-header">
@@ -1120,7 +1122,7 @@
                                 <span class="drawing-confidence">${data.confidence}</span>
                             </div>
                             <div class="drawing-preview">
-                                <img src="data:image/jpeg;base64,${data.image}" alt="Drawing ${data.index}">
+                                <img src="${data.image_url}" alt="Drawing ${data.index}">
                             </div>
                             <div class="drawing-location" id="location-${data.index}">
                                 <span class="drawing-location-label">📍 Location:</span>

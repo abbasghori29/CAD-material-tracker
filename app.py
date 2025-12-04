@@ -170,6 +170,7 @@ async def schedule_job_cancellation(job_id: str, delay: int = 60):
         print(f"[JOB-{job_id}] ⏰ No reconnection after {delay}s - cancelling job")
         job.status = JobStatus.FAILED
         job.error = "Cancelled - no active clients for 60 seconds"
+        cleanup_job_images(job_id)  # Clean up saved images
         cleanup_job(job_id)
     elif job_id in CANCELLATION_TASKS:
         # Job was reconnected - remove cancellation task
@@ -237,10 +238,11 @@ import tempfile
 UPLOAD_FOLDER = "uploads"
 OUTPUT_FOLDER = "output_images"
 RESULTS_FOLDER = "results"
+IMAGES_FOLDER = "static/images"  # Server-side image storage for WebSocket
 AUTO_CLEANUP = os.getenv("AUTO_CLEANUP", "false").lower() == "true"  # Set AUTO_CLEANUP=true in .env to enable
 
 # Ensure folders exist
-for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER, RESULTS_FOLDER, "static", "templates"]:
+for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER, RESULTS_FOLDER, "static", "templates", IMAGES_FOLDER]:
     os.makedirs(folder, exist_ok=True)
 
 # Prevent PIL crash
@@ -324,6 +326,22 @@ def image_to_base64(img: Image.Image, format: str = "JPEG", quality: int = 85) -
     buffered = BytesIO()
     img.save(buffered, format=format, quality=quality)
     return base64.b64encode(buffered.getvalue()).decode()
+
+def save_image_to_disk(img: Image.Image, filename: str, quality: int = 80) -> str:
+    """Save image to disk and return URL path"""
+    filepath = os.path.join(IMAGES_FOLDER, filename)
+    img.save(filepath, "JPEG", quality=quality)
+    return f"/static/images/{filename}"
+
+def cleanup_job_images(job_id: str):
+    """Delete all images for a job"""
+    import glob
+    pattern = os.path.join(IMAGES_FOLDER, f"{job_id}-*")
+    for filepath in glob.glob(pattern):
+        try:
+            os.remove(filepath)
+        except:
+            pass
 
 
 async def broadcast(message: dict):
@@ -720,15 +738,10 @@ async def process_pdf_with_job(job: JobState):
             for idx, page_num in enumerate(range(job.start_page, min(job.end_page + 1, len(pdf.pages) + 1))):
                 job.current_page = page_num
                 
-                # CHECK: If no subscribers, cancel job immediately
-                if len(job.subscribers) == 0:
-                    print(f"[JOB-{job.job_id}] ❌ CANCELLED - No subscribers (user refreshed/closed)")
-                    job.status = JobStatus.FAILED
-                    job.error = "Cancelled - no active clients"
-                    cleanup_job(job.job_id)
-                    return
+                # Job continues even with 0 subscribers (60s timeout handles cancellation)
+                # This allows for reconnection without losing progress
                 
-                print(f"[JOB-{job.job_id}] Starting page {page_num}")
+                print(f"[JOB-{job.job_id}] Starting page {page_num} (subscribers: {len(job.subscribers)})")
                 
                 # Get page AND sheet number in thread (both can block)
                 def get_page_and_sheet():
@@ -761,61 +774,54 @@ async def process_pdf_with_job(job: JobState):
                     full_page_img, cropped_drawings, drawing_data = None, [], []
                 
                 if full_page_img:
-                    # Resize full page image to reduce payload size (max 1200px width)
+                    # Save full page image to disk and send URL (no size limit issues)
                     full_page_resized = full_page_img.copy()
-                    if full_page_resized.width > 1200:
-                        ratio = 1200 / full_page_resized.width
+                    if full_page_resized.width > 1400:
+                        ratio = 1400 / full_page_resized.width
                         new_height = int(full_page_resized.height * ratio)
-                        full_page_resized = full_page_resized.resize((1200, new_height), Image.Resampling.LANCZOS)
-                        print(f"[JOB-{job.job_id}] Resized full page from {full_page_img.size} to {full_page_resized.size}")
+                        full_page_resized = full_page_resized.resize((1400, new_height), Image.Resampling.LANCZOS)
                     
-                    # Send full page preview with lower quality to reduce payload
-                    try:
-                        await job.broadcast({
-                            "type": "full_page",
-                            "image": image_to_base64(full_page_resized, quality=50),  # Reduced from 70 to 50
-                            "page": page_num,
-                            "sheet": sheet,
-                            "drawing_count": len(cropped_drawings)
-                        })
-                    except Exception as e:
-                        print(f"[JOB-{job.job_id}] ⚠️ Failed to send full_page (non-critical): {e}")
-                        # Continue processing - don't crash on image send failure
+                    # Save to disk and get URL
+                    full_page_filename = f"{job.job_id}-page-{page_num}-full.jpg"
+                    full_page_url = save_image_to_disk(full_page_resized, full_page_filename, quality=75)
+                    print(f"[JOB-{job.job_id}] Saved full page to {full_page_url}")
+                    
+                    # Send URL instead of base64 (tiny payload, no connection issues)
+                    await job.broadcast({
+                        "type": "full_page",
+                        "image_url": full_page_url,  # URL instead of base64
+                        "page": page_num,
+                        "sheet": sheet,
+                        "drawing_count": len(cropped_drawings)
+                    })
                 
                 if cropped_drawings:
                     num_drawings = len(cropped_drawings)
                     
                     # Process each drawing ONE BY ONE - NO PARALLEL
                     for i, crop_data in enumerate(cropped_drawings):
-                        # CHECK: Cancel if no subscribers
-                        if len(job.subscribers) == 0:
-                            print(f"[JOB-{job.job_id}] ❌ CANCELLED mid-page - No subscribers")
-                            job.status = JobStatus.FAILED
-                            job.error = "Cancelled - no active clients"
-                            cleanup_job(job.job_id)
-                            return
-                        
+                        # Job continues even with 0 subscribers (allows reconnection)
                         cropped_img = crop_data["image"]
                         conf = crop_data["confidence"]
                         
-                        # Send drawing preview (resize if too large)
+                        # Save drawing image to disk and send URL (no size limit issues)
                         drawing_img = cropped_img.copy()
-                        if drawing_img.width > 1000 or drawing_img.height > 1000:
-                            drawing_img.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
-                            print(f"[JOB-{job.job_id}] Resized drawing {i+1} to {drawing_img.size}")
+                        if drawing_img.width > 1200 or drawing_img.height > 1200:
+                            drawing_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
                         
-                        try:
-                            await job.broadcast({
-                                "type": "drawing",
-                                "index": i + 1,
-                                "total_drawings": num_drawings,
-                                "image": image_to_base64(drawing_img, quality=75),  # Reduced from 85 to 75
-                                "confidence": f"{conf:.0%}",
-                                "bbox": crop_data["bbox"]
-                            })
-                        except Exception as e:
-                            print(f"[JOB-{job.job_id}] ⚠️ Failed to send drawing {i+1} (non-critical): {e}")
-                            # Continue processing - don't crash on image send failure
+                        # Save to disk and get URL
+                        drawing_filename = f"{job.job_id}-page-{page_num}-drawing-{i+1}.jpg"
+                        drawing_url = save_image_to_disk(drawing_img, drawing_filename, quality=80)
+                        
+                        # Send URL instead of base64 (tiny payload, no connection issues)
+                        await job.broadcast({
+                            "type": "drawing",
+                            "index": i + 1,
+                            "total_drawings": num_drawings,
+                            "image_url": drawing_url,  # URL instead of base64
+                            "confidence": f"{conf:.0%}",
+                            "bbox": crop_data["bbox"]
+                        })
                         
                         await job.broadcast({
                             "type": "log",
@@ -936,8 +942,9 @@ async def process_pdf_with_job(job: JobState):
             "message": "Auto-cleanup: Temporary files deleted (CSV results kept)"
         })
     
-    # Cleanup job after 5 minutes
+    # Cleanup job and images after 5 minutes
     await asyncio.sleep(300)
+    cleanup_job_images(job.job_id)  # Clean up saved images
     cleanup_job(job.job_id)
 
 
