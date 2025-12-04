@@ -12,15 +12,133 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Optional
 import base64
 from io import BytesIO
 from datetime import datetime
 from dotenv import load_dotenv
 import gc  # Garbage collection for memory cleanup
+import uuid
+from enum import Enum
 
 # Load environment variables
 load_dotenv()
+
+# ========================================
+# JOB MANAGEMENT SYSTEM - BULLETPROOF
+# ========================================
+
+class JobStatus(str, Enum):
+    """Job status enum"""
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class JobState:
+    """Represents a processing job that runs independently of WebSocket"""
+    def __init__(self, job_id: str, pdf_path: str, start_page: int, end_page: int):
+        self.job_id = job_id
+        self.pdf_path = pdf_path
+        self.start_page = start_page
+        self.end_page = end_page
+        self.status = JobStatus.QUEUED
+        self.current_page = start_page
+        self.total_pages = end_page - start_page + 1
+        self.results = []
+        self.error = None
+        self.started_at = datetime.now()
+        self.completed_at = None
+        self.subscribers: List[WebSocket] = []  # WebSockets watching this job
+        self.messages = []  # Store all messages for late joiners
+        
+    def add_subscriber(self, websocket: WebSocket):
+        """Add a WebSocket to watch this job"""
+        if websocket not in self.subscribers:
+            self.subscribers.append(websocket)
+            print(f"[JOB-{self.job_id}] Added subscriber. Total: {len(self.subscribers)}")
+    
+    def remove_subscriber(self, websocket: WebSocket):
+        """Remove a WebSocket from this job"""
+        if websocket in self.subscribers:
+            self.subscribers.remove(websocket)
+            print(f"[JOB-{self.job_id}] Removed subscriber. Total: {len(self.subscribers)}")
+            
+            # If no subscribers left, mark job for cancellation
+            if len(self.subscribers) == 0 and self.status == JobStatus.RUNNING:
+                print(f"[JOB-{self.job_id}] ⚠️ No subscribers left - job will be cancelled")
+                return True  # Signal to cancel
+        return False
+    
+    async def broadcast(self, message: dict):
+        """Broadcast message to all subscribers (no storage - we don't replay)"""
+        # Broadcast to all connected clients
+        dead_sockets = []
+        for ws in self.subscribers[:]:  # Copy list to avoid modification during iteration
+            try:
+                await ws.send_json(message)
+            except Exception as e:
+                print(f"[JOB-{self.job_id}] Failed to send to subscriber: {e}")
+                dead_sockets.append(ws)
+        
+        # Remove dead sockets
+        for ws in dead_sockets:
+            self.remove_subscriber(ws)
+    
+    async def send_summary(self, websocket: WebSocket):
+        """Send job summary to reconnecting client - NO IMAGE REPLAY"""
+        print(f"[JOB-{self.job_id}] Sending summary (no replay) to new subscriber")
+        
+        # Count what we've done
+        pages_processed = self.current_page - self.start_page
+        
+        # Send summary
+        try:
+            await websocket.send_json({
+                "type": "reconnect_summary",
+                "job_id": self.job_id,
+                "status": self.status,
+                "current_page": self.current_page,
+                "total_pages": self.total_pages,
+                "pages_processed": pages_processed,
+                "results_count": len(self.results),
+                "message": f"Caught up to page {self.current_page}/{self.end_page}"
+            })
+            
+            # Send current stats
+            await websocket.send_json({
+                "type": "log",
+                "level": "success",
+                "message": f"📊 Reconnected: Page {self.current_page}/{self.end_page} | {len(self.results)} tags found so far"
+            })
+            
+            print(f"[JOB-{self.job_id}] Summary sent, will continue from page {self.current_page}")
+        except Exception as e:
+            print(f"[JOB-{self.job_id}] Failed to send summary: {e}")
+
+# Global job registry
+ACTIVE_JOBS: Dict[str, JobState] = {}
+JOB_TASKS: Dict[str, asyncio.Task] = {}
+
+def create_job(pdf_path: str, start_page: int, end_page: int) -> JobState:
+    """Create a new job"""
+    job_id = str(uuid.uuid4())[:8]  # Short UUID
+    job = JobState(job_id, pdf_path, start_page, end_page)
+    ACTIVE_JOBS[job_id] = job
+    print(f"[JOB-{job_id}] Created: {pdf_path}, pages {start_page}-{end_page}")
+    return job
+
+def get_job(job_id: str) -> Optional[JobState]:
+    """Get job by ID"""
+    return ACTIVE_JOBS.get(job_id)
+
+def cleanup_job(job_id: str):
+    """Clean up completed job after some time"""
+    if job_id in ACTIVE_JOBS:
+        del ACTIVE_JOBS[job_id]
+    if job_id in JOB_TASKS:
+        del JOB_TASKS[job_id]
+    print(f"[JOB-{job_id}] Cleaned up")
 
 # OpenAI Vision for location description extraction
 from langchain_openai import ChatOpenAI
@@ -34,16 +152,25 @@ class DrawingLocationInfo(BaseModel):
     )
 
 # Shared prompt for location extraction
-LOCATION_EXTRACTION_PROMPT = """Read the drawing title or location label from this CAD drawing image.
+LOCATION_EXTRACTION_PROMPT = """Extract the drawing title/location from this CAD drawing image.
 
-Look in the title block, header, or label area.
+Look carefully at these areas:
+- Title block (usually bottom-right corner or top of page)
+- Drawing header/label (large text near top)
+- Sheet information area
+- Any prominent text labels
 
-Return exactly what you see written - could be:
-- With prefix: "E1 ELEVATION WEST", "A101 FLOOR PLAN", "S2 FRAMING"
-- Without prefix: "KITCHEN ELEVATION", "LEVEL 3 PLAN", "SECTION AT GARAGE"
+Extract the main title or location identifier. Examples:
+- "E1 ELEVATION WEST"
+- "KITCHEN ELEVATION" 
+- "LEVEL 3 PLAN"
+- "A101 FLOOR PLAN"
+- "SECTION AT GARAGE"
+- "DOOR SCHEDULE"
+- "TYPICAL MOUNTING HEIGHTS"
 
-Just read what's there. Don't make up text that isn't visible.
-If no title/location is visible, return empty string."""
+Return the text you see. If multiple text elements exist, combine them into a meaningful title.
+Only return empty string if there is truly NO title or location text visible in the image."""
 
 # OpenAI setup for vision
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -264,23 +391,115 @@ def detect_drawings_on_page(page, page_num: int):
 
 
 def ocr_image(img: Image.Image) -> str:
-    """OCR an image"""
+    """OCR an image with advanced preprocessing for CAD drawings - optimized for material tags"""
     try:
-        # Enhance
-        if img.mode != 'L':
-            img = img.convert('L')
-        img = ImageEnhance.Contrast(img).enhance(2.0)
-        img = img.filter(ImageFilter.SHARPEN).convert('RGB')
-        
-        buffered = BytesIO()
-        img.save(buffered, format='PNG')
-        buffered.seek(0)
-        
         from pytesseract import image_to_string
-        # PSM 11 = Sparse text - finds scattered text in any order (best for CAD drawings)
-        return image_to_string(Image.open(buffered), config='--psm 11 --oem 3')
-    except:
-        return ""
+        
+        # Convert to grayscale
+        if img.mode != 'L':
+            img_gray = img.convert('L')
+        else:
+            img_gray = img.copy()
+        
+        # CRITICAL: Scale up small images (OCR works better on larger text)
+        width, height = img_gray.size
+        min_dimension = 1200  # Minimum dimension for good OCR
+        if width < min_dimension or height < min_dimension:
+            scale = max(min_dimension / width, min_dimension / height)
+            new_size = (int(width * scale), int(height * scale))
+            img_gray = img_gray.resize(new_size, Image.Resampling.LANCZOS)
+        
+        # Aggressive contrast enhancement
+        img_enhanced = ImageEnhance.Contrast(img_gray).enhance(3.5)
+        img_enhanced = ImageEnhance.Brightness(img_enhanced).enhance(1.1)
+        
+        # Auto-contrast for better text visibility
+        img_enhanced = ImageOps.autocontrast(img_enhanced, cutoff=5)
+        
+        # Sharpen to make text edges crisp
+        img_enhanced = img_enhanced.filter(ImageFilter.SHARPEN)
+        img_enhanced = img_enhanced.filter(ImageFilter.EDGE_ENHANCE_MORE)
+        
+        # Remove noise
+        img_enhanced = img_enhanced.filter(ImageFilter.MedianFilter(size=3))
+        
+        # Try multiple OCR strategies and combine
+        results = []
+        char_whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_'
+        
+        # Strategy 1: Sparse text with character whitelist (best for material tags)
+        try:
+            text1 = image_to_string(
+                img_enhanced,
+                config=f'--psm 11 --oem 3 -c tessedit_char_whitelist={char_whitelist}'
+            )
+            if text1.strip():
+                results.append(text1.strip())
+        except Exception as e:
+            print(f"[OCR] Strategy 1 failed: {e}")
+        
+        # Strategy 2: Single word mode (for individual tags like "A1", "B2")
+        try:
+            text2 = image_to_string(
+                img_enhanced,
+                config=f'--psm 8 --oem 3 -c tessedit_char_whitelist={char_whitelist}'
+            )
+            if text2.strip() and text2.strip() not in results:
+                results.append(text2.strip())
+        except:
+            pass
+        
+        # Strategy 3: Use LSTM neural network (slower but more accurate)
+        try:
+            text3 = image_to_string(
+                img_enhanced,
+                config=f'--psm 11 --oem 1 -c tessedit_char_whitelist={char_whitelist}'
+            )
+            if text3.strip() and text3.strip() not in results:
+                results.append(text3.strip())
+        except:
+            pass
+        
+        # Strategy 4: Try inverted image (some CAD drawings have white text on dark)
+        try:
+            img_inverted = ImageOps.invert(img_enhanced)
+            text4 = image_to_string(
+                img_inverted,
+                config=f'--psm 11 --oem 3 -c tessedit_char_whitelist={char_whitelist}'
+            )
+            if text4.strip() and text4.strip() not in results:
+                results.append(text4.strip())
+        except:
+            pass
+        
+        # Combine all unique results
+        combined = ' '.join(set(results)).strip()
+        
+        # Clean up common OCR misreads
+        replacements = {
+            '|': 'I',  # Pipe to I
+            '0': 'O',  # Zero to O (context-dependent, but helps)
+            '1': 'I',  # One to I (for tags like "A1" vs "AI")
+            '5': 'S',  # Five to S
+            '8': 'B',  # Eight to B
+        }
+        for old, new in replacements.items():
+            combined = combined.replace(old, new)
+        
+        return combined if combined else ""
+        
+    except Exception as e:
+        print(f"[OCR] Error: {type(e).__name__}: {e}")
+        # Fallback to simple OCR
+        try:
+            if img.mode != 'L':
+                img = img.convert('L')
+            img = ImageEnhance.Contrast(img).enhance(2.0)
+            img = img.filter(ImageFilter.SHARPEN)
+            from pytesseract import image_to_string
+            return image_to_string(img, config='--psm 11 --oem 3')
+        except:
+            return ""
 
 
 def extract_location_description(img: Image.Image) -> str:
@@ -424,13 +643,14 @@ def get_sheet_number(page) -> str:
     return "N/A"
 
 
-async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
-    """Process PDF with real-time WebSocket updates"""
-    print(f"[PROCESS] Starting PDF processing: {pdf_path}")
+async def process_pdf_with_job(job: JobState):
+    """Process PDF as a background job - independent of WebSocket"""
+    job.status = JobStatus.RUNNING
+    print(f"[JOB-{job.job_id}] Starting PDF processing: {job.pdf_path}")
     results = []
     target_tags = list(TAG_DESCRIPTIONS.keys())
     
-    await broadcast({"type": "start", "message": "Starting extraction..."})
+    await job.broadcast({"type": "start", "message": "Starting extraction..."})
     
     def process_ocr_and_tags(text, conf, sheet, page_num, location_desc):
         """Process OCR text to find tags (runs in thread)"""
@@ -456,13 +676,24 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
         return matched_tags, drawing_results
     
     try:
-        with pdfplumber.open(pdf_path) as pdf:
-            total = min(end_page, len(pdf.pages)) - start_page + 1
+        with pdfplumber.open(job.pdf_path) as pdf:
+            total = min(job.end_page, len(pdf.pages)) - job.start_page + 1
+            job.total_pages = total
             
-            await broadcast({"type": "info", "total_pages": total})
+            await job.broadcast({"type": "info", "total_pages": total})
             
-            for idx, page_num in enumerate(range(start_page, min(end_page + 1, len(pdf.pages) + 1))):
-                print(f"[PROCESS] Starting page {page_num}")
+            for idx, page_num in enumerate(range(job.start_page, min(job.end_page + 1, len(pdf.pages) + 1))):
+                job.current_page = page_num
+                
+                # CHECK: If no subscribers, cancel job immediately
+                if len(job.subscribers) == 0:
+                    print(f"[JOB-{job.job_id}] ❌ CANCELLED - No subscribers (user refreshed/closed)")
+                    job.status = JobStatus.FAILED
+                    job.error = "Cancelled - no active clients"
+                    cleanup_job(job.job_id)
+                    return
+                
+                print(f"[JOB-{job.job_id}] Starting page {page_num}")
                 
                 # Get page AND sheet number in thread (both can block)
                 def get_page_and_sheet():
@@ -471,10 +702,10 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                     return page, sheet
                 
                 page, sheet = await asyncio.to_thread(get_page_and_sheet)
-                print(f"[PROCESS] Page {page_num} loaded, sheet: {sheet}")
+                print(f"[JOB-{job.job_id}] Page {page_num} loaded, sheet: {sheet}")
                 
                 # Send page start
-                await broadcast({
+                await job.broadcast({
                     "type": "page_start",
                     "page": page_num,
                     "sheet": sheet,
@@ -483,20 +714,20 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                 })
                 
                 # Detect drawings - run in thread to not block heartbeat
-                await broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
-                print(f"[PROCESS] Starting detection for page {page_num}")
+                await job.broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
+                print(f"[JOB-{job.job_id}] Starting detection for page {page_num}")
                 try:
                     full_page_img, cropped_drawings, drawing_data = await asyncio.to_thread(
                         detect_drawings_on_page, page, page_num
                     )
-                    print(f"[PROCESS] Detection complete: {len(cropped_drawings) if cropped_drawings else 0} drawings")
+                    print(f"[JOB-{job.job_id}] Detection complete: {len(cropped_drawings) if cropped_drawings else 0} drawings")
                 except Exception as e:
-                    print(f"[PROCESS] Detection ERROR: {type(e).__name__}: {e}")
+                    print(f"[JOB-{job.job_id}] Detection ERROR: {type(e).__name__}: {e}")
                     full_page_img, cropped_drawings, drawing_data = None, [], []
                 
                 if full_page_img:
                     # Send full page preview immediately
-                    await broadcast({
+                    await job.broadcast({
                         "type": "full_page",
                         "image": image_to_base64(full_page_img, quality=70),
                         "page": page_num,
@@ -509,11 +740,19 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                     
                     # Process each drawing ONE BY ONE - NO PARALLEL
                     for i, crop_data in enumerate(cropped_drawings):
+                        # CHECK: Cancel if no subscribers
+                        if len(job.subscribers) == 0:
+                            print(f"[JOB-{job.job_id}] ❌ CANCELLED mid-page - No subscribers")
+                            job.status = JobStatus.FAILED
+                            job.error = "Cancelled - no active clients"
+                            cleanup_job(job.job_id)
+                            return
+                        
                         cropped_img = crop_data["image"]
                         conf = crop_data["confidence"]
                         
                         # Send drawing preview
-                        await broadcast({
+                        await job.broadcast({
                             "type": "drawing",
                             "index": i + 1,
                             "total_drawings": num_drawings,
@@ -522,7 +761,7 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                             "bbox": crop_data["bbox"]
                         })
                         
-                        await broadcast({
+                        await job.broadcast({
                             "type": "log",
                             "level": "info",
                             "message": f"Analyzing drawing {i + 1}/{num_drawings}..."
@@ -532,22 +771,22 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         location_desc = ""
                         if OPENAI_AVAILABLE:
                             try:
-                                await broadcast({"type": "log", "level": "info", "message": f"Extracting location..."})
-                                print(f"[PROCESS] Starting OpenAI call for drawing {i+1}")
+                                await job.broadcast({"type": "log", "level": "info", "message": f"Extracting location..."})
+                                print(f"[JOB-{job.job_id}] Starting OpenAI call for drawing {i+1}")
                                 location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
-                                print(f"[PROCESS] OpenAI call complete: {location_desc[:50] if location_desc else 'empty'}")
+                                print(f"[JOB-{job.job_id}] OpenAI call complete: {location_desc[:50] if location_desc else 'empty'}")
                             except Exception as e:
-                                print(f"[PROCESS] OpenAI ERROR: {type(e).__name__}: {e}")
-                                await broadcast({"type": "log", "level": "warning", "message": f"Location extraction failed"})
+                                print(f"[JOB-{job.job_id}] OpenAI ERROR: {type(e).__name__}: {e}")
+                                await job.broadcast({"type": "log", "level": "warning", "message": f"Location extraction failed"})
                         
                         # Step 2: Run OCR (sequential)
                         try:
-                            await broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
-                            print(f"[PROCESS] Starting OCR for drawing {i+1}")
+                            await job.broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
+                            print(f"[JOB-{job.job_id}] Starting OCR for drawing {i+1}")
                             text = await asyncio.to_thread(ocr_image, cropped_img)
-                            print(f"[PROCESS] OCR complete: {len(text)} chars")
+                            print(f"[JOB-{job.job_id}] OCR complete: {len(text)} chars")
                         except Exception as e:
-                            print(f"[PROCESS] OCR ERROR: {type(e).__name__}: {e}")
+                            print(f"[JOB-{job.job_id}] OCR ERROR: {type(e).__name__}: {e}")
                             text = ""
                         
                         # Process tags
@@ -556,14 +795,14 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         )
                         
                         if location_desc:
-                            await broadcast({
+                            await job.broadcast({
                                 "type": "log",
                                 "level": "success",
                                 "message": f"Drawing {i + 1} → {location_desc}"
                             })
                         
                         # Send OCR result with location
-                        await broadcast({
+                        await job.broadcast({
                             "type": "ocr_result",
                             "drawing_index": i + 1,
                             "tags_found": matched_tags,
@@ -573,14 +812,15 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                         
                         # Add to results
                         results.extend(drawing_results)
+                        job.results = results  # Update job state
                     
-                    await broadcast({
+                    await job.broadcast({
                         "type": "log",
                         "level": "success",
                         "message": f"Page {page_num} complete - {num_drawings} drawings processed"
                     })
                 else:
-                    await broadcast({
+                    await job.broadcast({
                         "type": "log",
                         "level": "warning",
                         "message": f"No drawings detected on page {page_num}"
@@ -609,39 +849,40 @@ async def process_pdf_realtime(pdf_path: str, start_page: int, end_page: int):
                 for i, r in enumerate(results, 1):
                     writer.writerow([i, r["material"], r["description"], r["sheet"], r["page"], r["confidence"], r.get("location", "")])
             
-            await broadcast({
+            # Job completed successfully
+            job.status = JobStatus.COMPLETED
+            job.completed_at = datetime.now()
+            
+            await job.broadcast({
                 "type": "complete",
                 "total_tags": len(results),
-                "results": results
+                "results": results,
+                "job_id": job.job_id
             })
             
-            # Wait a moment for client to receive the complete message
-            await asyncio.sleep(2)
-            
-            # Auto-close WebSocket after job completes
-            for connection in list(active_connections):
-                try:
-                    await connection.close(code=1000, reason="Job completed successfully")
-                    print(f"[WS] Auto-closed connection after job completion")
-                except:
-                    pass
-            active_connections.clear()
+            print(f"[JOB-{job.job_id}] COMPLETED - {len(results)} tags found")
             
     except Exception as e:
-        print(f"[PROCESS] FATAL ERROR: {type(e).__name__}: {e}")
+        job.status = JobStatus.FAILED
+        job.error = str(e)
+        print(f"[JOB-{job.job_id}] FATAL ERROR: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        await broadcast({"type": "error", "message": str(e)})
+        await job.broadcast({"type": "error", "message": str(e)})
     
     # Auto-cleanup AFTER PDF is closed (outside the 'with' block)
     if AUTO_CLEANUP:
         await asyncio.sleep(0.5)  # Small delay to ensure file handles are released
         cleanup_temp_files()
-        await broadcast({
+        await job.broadcast({
             "type": "log",
             "level": "info",
             "message": "Auto-cleanup: Temporary files deleted (CSV results kept)"
         })
+    
+    # Cleanup job after 5 minutes
+    await asyncio.sleep(300)
+    cleanup_job(job.job_id)
 
 
 # === ROUTES ===
@@ -676,27 +917,30 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint - NEVER times out, NEVER closes"""
+    """WebSocket endpoint with job-based processing"""
     await websocket.accept()
     active_connections.append(websocket)
     print(f"[WS] Connection accepted")
     
-    # Background tasks
+    current_job = None
     heartbeat_task = None
-    processing_task = None
     
     async def heartbeat():
-        """Send heartbeat every 1 second with keepalive logs"""
+        """Send heartbeat every 1 second - bulletproof connection"""
         count = 0
         errors = 0
+        dummy_data = "X" * 1000  # 1KB keepalive payload
+        
         while True:
-            await asyncio.sleep(1)  # Every 1 second
+            await asyncio.sleep(1)
             count += 1
             try:
-                # Send heartbeat
-                await websocket.send_json({"type": "heartbeat", "n": count})
+                await websocket.send_json({
+                    "type": "heartbeat", 
+                    "n": count,
+                    "keep_alive": dummy_data
+                })
                 
-                # Every 10 seconds, send a visible log to prove connection is alive
                 if count % 10 == 0:
                     await websocket.send_json({
                         "type": "log",
@@ -705,39 +949,73 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     print(f"[WS-HEARTBEAT] {count} seconds, connection alive")
                 
-                errors = 0  # Reset error count on success
+                errors = 0
             except Exception as e:
                 errors += 1
                 print(f"[WS-HEARTBEAT] FAILED #{errors} at {count}s: {type(e).__name__}")
-                if errors >= 3:  # Stop after 3 consecutive failures
+                if errors >= 3:
                     print(f"[WS-HEARTBEAT] Stopping after {errors} failures")
                     break
     
     try:
         # Start heartbeat IMMEDIATELY
         heartbeat_task = asyncio.create_task(heartbeat())
-        print(f"[WS] Heartbeat task created and started")
+        print(f"[WS] Heartbeat started")
         
-        # NO TIMEOUT - wait forever for messages
+        # Main message loop
         while True:
-            data = await websocket.receive_json()  # No timeout, wait forever
-            print(f"[WS] Received message: {data.get('action', 'unknown')}")
+            data = await websocket.receive_json()
+            action = data.get("action")
+            print(f"[WS] Received: {action}")
             
-            if data.get("action") == "ping":
+            if action == "ping":
                 await websocket.send_json({"type": "pong"})
-                print(f"[WS] Sent pong response")
             
-            elif data.get("action") == "process":
-                pdf_path = data.get("pdf_path")
-                start_page = data.get("start_page", 1)
-                end_page = data.get("end_page", 10)
-                print(f"[WS] Starting processing task for {pdf_path}, pages {start_page}-{end_page}")
-                
-                # Run processing as background task
-                processing_task = asyncio.create_task(
-                    process_pdf_realtime(pdf_path, start_page, end_page)
+            elif action == "process":
+                # CREATE NEW JOB
+                job = create_job(
+                    data.get("pdf_path"),
+                    data.get("start_page", 1),
+                    data.get("end_page", 10)
                 )
-                print(f"[WS] Processing task created and running in background")
+                current_job = job
+                
+                # Subscribe this WebSocket to the job
+                job.add_subscriber(websocket)
+                
+                # Send job ID to client
+                await websocket.send_json({
+                    "type": "job_created",
+                    "job_id": job.job_id,
+                    "message": f"Job {job.job_id} created"
+                })
+                
+                print(f"[WS] Created job {job.job_id}")
+                
+                # Start job in background (independent of WebSocket)
+                task = asyncio.create_task(process_pdf_with_job(job))
+                JOB_TASKS[job.job_id] = task
+                print(f"[WS] Job {job.job_id} started in background")
+            
+            elif action == "subscribe":
+                # SUBSCRIBE TO EXISTING JOB (reconnect scenario)
+                job_id = data.get("job_id")
+                job = get_job(job_id)
+                
+                if job:
+                    current_job = job
+                    job.add_subscriber(websocket)
+                    
+                    # Send summary (NO image replay)
+                    await job.send_summary(websocket)
+                    
+                    print(f"[WS] Subscribed to existing job {job_id} - will continue live")
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Job {job_id} not found"
+                    })
+                    print(f"[WS] Job {job_id} not found")
                 
     except WebSocketDisconnect as e:
         print(f"[WS] Client disconnected: code={e.code if hasattr(e, 'code') else 'unknown'}")
@@ -746,20 +1024,27 @@ async def websocket_endpoint(websocket: WebSocket):
         import traceback
         traceback.print_exc()
     finally:
-        # Aggressive cleanup on disconnect
+        # Clean up this WebSocket
         if websocket in active_connections:
             active_connections.remove(websocket)
+        
+        # Unsubscribe from job
+        if current_job:
+            should_cancel = current_job.remove_subscriber(websocket)
+            if should_cancel:
+                print(f"[WS] ❌ Last subscriber left - job {current_job.job_id} will be cancelled")
+            else:
+                print(f"[WS] Unsubscribed from job {current_job.job_id} (other clients still watching)")
+        
+        # Stop heartbeat
         if heartbeat_task:
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
             except:
                 pass
-        if processing_task and not processing_task.done():
-            # Let processing finish in background but don't block
-            pass
         
-        # Force garbage collection on disconnect
+        # Force garbage collection
         gc.collect()
         
         print(f"[WS] Connection closed and cleaned up")

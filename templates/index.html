@@ -780,9 +780,10 @@
         let currentDrawings = [];
         let stats = { pages: 0, drawings: 0, tags: 0 };
         
-        // Cleanup any lingering WebSocket connections on page load
+        // Cleanup any lingering WebSocket connections on page refresh
         window.addEventListener('beforeunload', function() {
             if (ws && ws.readyState === WebSocket.OPEN) {
+                console.log('[REFRESH] Closing WebSocket - job will be cancelled on server');
                 ws.close(1000, 'Page refresh');
             }
         });
@@ -844,12 +845,14 @@
             document.getElementById('drawings-container').innerHTML = '';
             document.getElementById('logs-container').innerHTML = '';
             
-            // Connection state
-            let processingComplete = false;
-            let processingStarted = false;
+            // JOB STATE - bulletproof tracking
+            let jobId = null;
+            let jobStarted = false;
+            let jobComplete = false;
+            let reconnectAttempts = 0;
+            let maxReconnectAttempts = 999;  // Essentially infinite
             let lastPongReceived = Date.now();
             let clientPingInterval = null;
-            let connectionMonitor = null;
             
             // Store processing params
             const startVal = document.getElementById('start-page').value;
@@ -867,14 +870,22 @@
 
                 ws.onopen = () => {
                     lastPongReceived = Date.now();
+                    reconnectAttempts = 0;  // Reset on successful connect
                     
-                    if (!processingStarted) {
-                        addLog('info', 'Connected to server');
-                        // Send process command only on first connect
+                    if (!jobStarted) {
+                        // First connection - start new job
+                        addLog('info', '🔗 Connected to server');
                         ws.send(JSON.stringify(processParams));
-                        processingStarted = true;
+                        jobStarted = true;
+                    } else if (jobId) {
+                        // Reconnection - subscribe to existing job
+                        addLog('success', `🔄 Reconnected! Resuming job ${jobId}...`);
+                        ws.send(JSON.stringify({
+                            action: 'subscribe',
+                            job_id: jobId
+                        }));
                     } else {
-                        addLog('success', 'Reconnected to server');
+                        addLog('warning', 'Reconnected but no job ID found');
                     }
                     
                     // Clear any existing intervals
@@ -907,9 +918,31 @@
                     // Track ALL messages for connection health
                     lastPongReceived = Date.now();
                     
+                    // Capture job ID when created
+                    if (data.type === 'job_created') {
+                        jobId = data.job_id;
+                        console.log('[JOB] Job created:', jobId);
+                        addLog('success', `🎯 Job ${jobId} started - processing begins...`);
+                        return;
+                    }
+                    
+                    // Handle reconnect summary (no image replay)
+                    if (data.type === 'reconnect_summary') {
+                        console.log('[JOB] Reconnect summary:', data);
+                        addLog('success', `⚡ Reconnected to job ${data.job_id}`);
+                        addLog('info', `📊 Progress: Page ${data.current_page}/${data.total_pages} | ${data.results_count} tags found`);
+                        
+                        // Update stats display
+                        stats.pages = data.pages_processed;
+                        stats.tags = data.results_count;
+                        updateStats();
+                        
+                        return;
+                    }
+                    
                     // Track pong/heartbeat silently
                     if (data.type === 'pong' || data.type === 'heartbeat') {
-                        return;  // Don't process further
+                        return;
                     }
                     
                     // Track progress silently
@@ -917,29 +950,39 @@
                         return;
                     }
                     
+                    // Job complete
                     if (data.type === 'complete') {
-                        processingComplete = true;
+                        jobComplete = true;
+                        addLog('success', `✅ Job ${jobId} COMPLETE! ${data.total_tags} tags found.`);
                     }
                     
                     handleMessage(data);
                 };
 
                 ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
+                    console.error('[WS] Error:', error);
                 };
 
                 ws.onclose = (event) => {
                     // Clear intervals
                     if (clientPingInterval) clearInterval(clientPingInterval);
-                    if (connectionMonitor) clearInterval(connectionMonitor);
                     
-                    if (processingComplete) {
-                        addLog('success', '✅ Job complete! Refresh page to start a new analysis.');
-                    } else if (event.code === 1000) {
-                        // Normal close
-                        addLog('info', 'Connection closed. Refresh to start a new job.');
+                    console.log('[WS] Closed:', event.code, event.reason);
+                    
+                    if (jobComplete) {
+                        // Job finished - all done
+                        addLog('success', '✅ All done! Refresh page for new analysis.');
+                    } else if (jobId && reconnectAttempts < maxReconnectAttempts) {
+                        // Job still running - AUTO RECONNECT
+                        reconnectAttempts++;
+                        const delay = Math.min(1000 * reconnectAttempts, 5000);  // Max 5s delay
+                        addLog('warning', `⚠️ Connection lost. Reconnecting in ${delay/1000}s... (attempt ${reconnectAttempts})`);
+                        setTimeout(() => {
+                            console.log('[WS] Attempting reconnect...');
+                            connectWebSocket();
+                        }, delay);
                     } else {
-                        addLog('error', 'Connection closed unexpectedly. Please refresh and try again.');
+                        addLog('error', '❌ Connection closed. Refresh page to restart.');
                     }
                 };
             }
