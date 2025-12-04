@@ -779,11 +779,97 @@
         let totalPages = 0;
         let currentDrawings = [];
         let stats = { pages: 0, drawings: 0, tags: 0 };
+        let jobId = null;  // Global job ID for auto-resume
+        
+        // Auto-resume job on page load if one exists
+        async function checkAndResumeJob() {
+            const savedJobId = localStorage.getItem('cad_tracker_job_id');
+            if (!savedJobId) return;
+            
+            try {
+                const response = await fetch(`/api/jobs/${savedJobId}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    // Job not found - clear localStorage
+                    localStorage.removeItem('cad_tracker_job_id');
+                    return;
+                }
+                
+                // Job exists and is still running
+                if (data.status === 'running') {
+                    console.log('[AUTO-RESUME] Found active job:', savedJobId);
+                    
+                    // Show processing view
+                    document.getElementById('upload-panel').style.display = 'none';
+                    document.getElementById('processing-view').classList.add('active');
+                    
+                    // Start WebSocket and subscribe to existing job
+                    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+                    
+                    ws.onopen = () => {
+                        console.log('[AUTO-RESUME] Connected, subscribing to job', savedJobId);
+                        ws.send(JSON.stringify({
+                            action: 'subscribe',
+                            job_id: savedJobId
+                        }));
+                    };
+                    
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        console.log('[WS] Received:', data.type);
+                        
+                        // Set jobId for this session
+                        if (data.job_id) {
+                            jobId = data.job_id;
+                        }
+                        
+                        if (data.type === 'reconnect_summary') {
+                            jobId = data.job_id;
+                            addLog('success', `🔄 Resumed job ${data.job_id}`);
+                            addLog('info', `📊 Progress: Page ${data.current_page}/${data.total_pages} | ${data.results_count} tags found`);
+                            
+                            // Update stats
+                            stats.pages = data.pages_processed;
+                            stats.tags = data.results_count;
+                            updateStats();
+                        } else if (data.type === 'error') {
+                            addLog('error', data.message);
+                            localStorage.removeItem('cad_tracker_job_id');
+                        } else if (data.type === 'complete') {
+                            localStorage.removeItem('cad_tracker_job_id');
+                            handleMessage(data);
+                        } else {
+                            // Handle all other messages normally
+                            handleMessage(data);
+                        }
+                    };
+                    
+                    ws.onerror = (error) => {
+                        console.error('[AUTO-RESUME] WebSocket error:', error);
+                    };
+                    
+                    ws.onclose = () => {
+                        console.log('[AUTO-RESUME] WebSocket closed');
+                    };
+                } else {
+                    // Job completed or failed - clear localStorage
+                    localStorage.removeItem('cad_tracker_job_id');
+                }
+            } catch (error) {
+                console.error('[AUTO-RESUME] Error checking job:', error);
+                localStorage.removeItem('cad_tracker_job_id');
+            }
+        }
+        
+        // Check for saved job on page load
+        checkAndResumeJob();
         
         // Cleanup any lingering WebSocket connections on page refresh
         window.addEventListener('beforeunload', function() {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                console.log('[REFRESH] Closing WebSocket - job will be cancelled on server');
+                console.log('[REFRESH] Closing WebSocket - job will pause (resume on reload)');
                 ws.close(1000, 'Page refresh');
             }
         });
@@ -845,8 +931,11 @@
             document.getElementById('drawings-container').innerHTML = '';
             document.getElementById('logs-container').innerHTML = '';
             
+            // Clear any old job ID (starting new job)
+            localStorage.removeItem('cad_tracker_job_id');
+            jobId = null;  // Reset job ID for new job
+            
             // JOB STATE - bulletproof tracking
-            let jobId = null;
             let jobStarted = false;
             let jobComplete = false;
             let reconnectAttempts = 0;
@@ -924,7 +1013,9 @@
                     // Capture job ID when created
                     if (data.type === 'job_created') {
                         jobId = data.job_id;
-                        console.log('[JOB] Job created:', jobId);
+                        // Save to localStorage for auto-resume on refresh
+                        localStorage.setItem('cad_tracker_job_id', jobId);
+                        console.log('[JOB] Job created:', jobId, '(saved to localStorage)');
                         addLog('success', `🎯 Job ${jobId} started - processing begins...`);
                         return;
                     }
@@ -956,6 +1047,7 @@
                     // Job complete
                     if (data.type === 'complete') {
                         jobComplete = true;
+                        localStorage.removeItem('cad_tracker_job_id'); // Clear saved job
                         addLog('success', `✅ Job ${jobId} COMPLETE! ${data.total_tags} tags found.`);
                     }
                     

@@ -64,29 +64,39 @@ class JobState:
             self.subscribers.remove(websocket)
             print(f"[JOB-{self.job_id}] Removed subscriber. Total: {len(self.subscribers)}")
             
-            # If no subscribers left, mark job for cancellation
+            # If no subscribers left, schedule delayed cancellation (allow reconnection)
             if len(self.subscribers) == 0 and self.status == JobStatus.RUNNING:
-                print(f"[JOB-{self.job_id}] ⚠️ No subscribers left - job will be cancelled")
-                return True  # Signal to cancel
+                print(f"[JOB-{self.job_id}] ⚠️ No subscribers left - will cancel in 60s if no reconnection")
+                # Don't cancel immediately - allow time for reconnection
+                return False  # Don't cancel immediately
         return False
     
     async def broadcast(self, message: dict):
         """Broadcast message to all subscribers (no storage - we don't replay)"""
         if len(self.subscribers) == 0:
-            print(f"[JOB-{self.job_id}] ⚠️ Broadcast skipped - no subscribers. Message type: {message.get('type')}")
+            # Silently skip if no subscribers (job might be cancelled)
             return
         
         # Broadcast to all connected clients
         dead_sockets = []
         msg_type = message.get('type', 'unknown')
-        print(f"[JOB-{self.job_id}] Broadcasting '{msg_type}' to {len(self.subscribers)} subscriber(s)")
+        
+        # Only log non-image messages to reduce noise
+        if msg_type not in ['full_page', 'drawing', 'heartbeat']:
+            print(f"[JOB-{self.job_id}] Broadcasting '{msg_type}' to {len(self.subscribers)} subscriber(s)")
         
         for ws in self.subscribers[:]:  # Copy list to avoid modification during iteration
             try:
                 await ws.send_json(message)
-                print(f"[JOB-{self.job_id}] ✅ Sent '{msg_type}' successfully")
+                # Only log success for important messages
+                if msg_type not in ['full_page', 'drawing', 'heartbeat']:
+                    print(f"[JOB-{self.job_id}] ✅ Sent '{msg_type}' successfully")
             except Exception as e:
-                print(f"[JOB-{self.job_id}] ❌ Failed to send '{msg_type}' to subscriber: {type(e).__name__}: {e}")
+                # Disconnect is expected if client closed - don't spam logs
+                if 'WebSocketDisconnect' in str(type(e).__name__) or 'ConnectionClosed' in str(type(e).__name__):
+                    print(f"[JOB-{self.job_id}] Client disconnected during '{msg_type}' send")
+                else:
+                    print(f"[JOB-{self.job_id}] ❌ Failed to send '{msg_type}': {type(e).__name__}: {e}")
                 dead_sockets.append(ws)
         
         # Remove dead sockets
@@ -127,6 +137,7 @@ class JobState:
 # Global job registry
 ACTIVE_JOBS: Dict[str, JobState] = {}
 JOB_TASKS: Dict[str, asyncio.Task] = {}
+CANCELLATION_TASKS: Dict[str, asyncio.Task] = {}  # Track delayed cancellation tasks
 
 def create_job(pdf_path: str, start_page: int, end_page: int) -> JobState:
     """Create a new job"""
@@ -146,7 +157,23 @@ def cleanup_job(job_id: str):
         del ACTIVE_JOBS[job_id]
     if job_id in JOB_TASKS:
         del JOB_TASKS[job_id]
+    if job_id in CANCELLATION_TASKS:
+        del CANCELLATION_TASKS[job_id]
     print(f"[JOB-{job_id}] Cleaned up")
+
+async def schedule_job_cancellation(job_id: str, delay: int = 60):
+    """Schedule job cancellation after delay if no reconnection"""
+    await asyncio.sleep(delay)
+    
+    job = get_job(job_id)
+    if job and len(job.subscribers) == 0 and job.status == JobStatus.RUNNING:
+        print(f"[JOB-{job_id}] ⏰ No reconnection after {delay}s - cancelling job")
+        job.status = JobStatus.FAILED
+        job.error = "Cancelled - no active clients for 60 seconds"
+        cleanup_job(job_id)
+    elif job_id in CANCELLATION_TASKS:
+        # Job was reconnected - remove cancellation task
+        del CANCELLATION_TASKS[job_id]
 
 # OpenAI Vision for location description extraction
 from langchain_openai import ChatOpenAI
@@ -734,14 +761,26 @@ async def process_pdf_with_job(job: JobState):
                     full_page_img, cropped_drawings, drawing_data = None, [], []
                 
                 if full_page_img:
-                    # Send full page preview immediately
-                    await job.broadcast({
-                        "type": "full_page",
-                        "image": image_to_base64(full_page_img, quality=70),
-                        "page": page_num,
-                        "sheet": sheet,
-                        "drawing_count": len(cropped_drawings)
-                    })
+                    # Resize full page image to reduce payload size (max 1200px width)
+                    full_page_resized = full_page_img.copy()
+                    if full_page_resized.width > 1200:
+                        ratio = 1200 / full_page_resized.width
+                        new_height = int(full_page_resized.height * ratio)
+                        full_page_resized = full_page_resized.resize((1200, new_height), Image.Resampling.LANCZOS)
+                        print(f"[JOB-{job.job_id}] Resized full page from {full_page_img.size} to {full_page_resized.size}")
+                    
+                    # Send full page preview with lower quality to reduce payload
+                    try:
+                        await job.broadcast({
+                            "type": "full_page",
+                            "image": image_to_base64(full_page_resized, quality=50),  # Reduced from 70 to 50
+                            "page": page_num,
+                            "sheet": sheet,
+                            "drawing_count": len(cropped_drawings)
+                        })
+                    except Exception as e:
+                        print(f"[JOB-{job.job_id}] ⚠️ Failed to send full_page (non-critical): {e}")
+                        # Continue processing - don't crash on image send failure
                 
                 if cropped_drawings:
                     num_drawings = len(cropped_drawings)
@@ -759,15 +798,24 @@ async def process_pdf_with_job(job: JobState):
                         cropped_img = crop_data["image"]
                         conf = crop_data["confidence"]
                         
-                        # Send drawing preview
-                        await job.broadcast({
-                            "type": "drawing",
-                            "index": i + 1,
-                            "total_drawings": num_drawings,
-                            "image": image_to_base64(cropped_img, quality=85),
-                            "confidence": f"{conf:.0%}",
-                            "bbox": crop_data["bbox"]
-                        })
+                        # Send drawing preview (resize if too large)
+                        drawing_img = cropped_img.copy()
+                        if drawing_img.width > 1000 or drawing_img.height > 1000:
+                            drawing_img.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
+                            print(f"[JOB-{job.job_id}] Resized drawing {i+1} to {drawing_img.size}")
+                        
+                        try:
+                            await job.broadcast({
+                                "type": "drawing",
+                                "index": i + 1,
+                                "total_drawings": num_drawings,
+                                "image": image_to_base64(drawing_img, quality=75),  # Reduced from 85 to 75
+                                "confidence": f"{conf:.0%}",
+                                "bbox": crop_data["bbox"]
+                            })
+                        except Exception as e:
+                            print(f"[JOB-{job.job_id}] ⚠️ Failed to send drawing {i+1} (non-critical): {e}")
+                            # Continue processing - don't crash on image send failure
                         
                         await job.broadcast({
                             "type": "log",
@@ -1018,6 +1066,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     current_job = job
                     job.add_subscriber(websocket)
                     
+                    # Cancel any pending cancellation (someone reconnected!)
+                    if job_id in CANCELLATION_TASKS:
+                        CANCELLATION_TASKS[job_id].cancel()
+                        del CANCELLATION_TASKS[job_id]
+                        print(f"[WS] ✅ Cancelled scheduled cancellation - job {job_id} resumed!")
+                    
                     # Send summary (NO image replay)
                     await job.send_summary(websocket)
                     
@@ -1042,11 +1096,20 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Unsubscribe from job
         if current_job:
-            should_cancel = current_job.remove_subscriber(websocket)
-            if should_cancel:
-                print(f"[WS] ❌ Last subscriber left - job {current_job.job_id} will be cancelled")
+            current_job.remove_subscriber(websocket)
+            
+            # If no subscribers left, schedule delayed cancellation (allows reconnection)
+            if len(current_job.subscribers) == 0 and current_job.status == JobStatus.RUNNING:
+                # Cancel any existing cancellation task
+                if current_job.job_id in CANCELLATION_TASKS:
+                    CANCELLATION_TASKS[current_job.job_id].cancel()
+                
+                # Schedule new cancellation task (60s delay)
+                task = asyncio.create_task(schedule_job_cancellation(current_job.job_id, 60))
+                CANCELLATION_TASKS[current_job.job_id] = task
+                print(f"[WS] ⏰ Scheduled cancellation for job {current_job.job_id} in 60s (reconnect to resume)")
             else:
-                print(f"[WS] Unsubscribed from job {current_job.job_id} (other clients still watching)")
+                print(f"[WS] Unsubscribed from job {current_job.job_id} ({len(current_job.subscribers)} subscribers remaining)")
         
         # Stop heartbeat
         if heartbeat_task:
@@ -1061,6 +1124,44 @@ async def websocket_endpoint(websocket: WebSocket):
         
         print(f"[WS] Connection closed and cleaned up")
 
+
+@app.get("/api/jobs")
+async def list_active_jobs():
+    """List all active jobs (for reconnection)"""
+    jobs = []
+    for job_id, job in ACTIVE_JOBS.items():
+        jobs.append({
+            "job_id": job.job_id,
+            "status": job.status,
+            "current_page": job.current_page,
+            "total_pages": job.total_pages,
+            "start_page": job.start_page,
+            "end_page": job.end_page,
+            "results_count": len(job.results),
+            "subscribers": len(job.subscribers),
+            "started_at": job.started_at.isoformat() if job.started_at else None
+        })
+    return {"jobs": jobs}
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """Get status of a specific job"""
+    job = get_job(job_id)
+    if not job:
+        return {"error": f"Job {job_id} not found"}
+    
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "current_page": job.current_page,
+        "total_pages": job.total_pages,
+        "start_page": job.start_page,
+        "end_page": job.end_page,
+        "results_count": len(job.results),
+        "subscribers": len(job.subscribers),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "error": job.error
+    }
 
 @app.get("/download")
 async def download_csv():
