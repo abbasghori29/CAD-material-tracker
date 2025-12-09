@@ -1179,6 +1179,8 @@ async def download_csv():
     return {"error": "No results available"}
 
 
+
+
 @app.post("/cleanup")
 async def cleanup_endpoint():
     """Manually trigger cleanup of temporary files"""
@@ -1187,6 +1189,207 @@ async def cleanup_endpoint():
         return {"success": True, "message": "Cleanup completed. Temporary files deleted (CSV results kept)."}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ========================================
+# TAG MANAGEMENT API ENDPOINTS
+# ========================================
+
+MATERIAL_DESCRIPTIONS_FILE = "material_descriptions.json"
+
+def save_tags_to_file():
+    """Save TAG_DESCRIPTIONS to material_descriptions.json"""
+    try:
+        with open(MATERIAL_DESCRIPTIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(TAG_DESCRIPTIONS, f, indent=4, ensure_ascii=False)
+        print(f"[TAGS] Saved {len(TAG_DESCRIPTIONS)} tags to {MATERIAL_DESCRIPTIONS_FILE}")
+        return True
+    except Exception as e:
+        print(f"[TAGS] Error saving tags: {e}")
+        return False
+
+def validate_tag_format(tag: str) -> bool:
+    """Validate tag format (e.g., A1, BR-1, MT-05, FCL-2)"""
+    # Pattern: 1-3 letters, optional dash/underscore, 1-2 digits
+    pattern = re.compile(r'^[A-Z]{1,3}[-_]?\d{1,2}$', re.IGNORECASE)
+    return bool(pattern.match(tag))
+
+@app.get("/api/tags")
+async def get_all_tags():
+    """Get all tags and descriptions"""
+    tags = [{"tag": tag, "description": desc} for tag, desc in TAG_DESCRIPTIONS.items()]
+    return {"tags": tags, "count": len(tags)}
+
+@app.post("/api/tags")
+async def add_tag(tag: str = Form(...), description: str = Form(...)):
+    """Add a single tag with description"""
+    tag = tag.strip().upper()
+    description = description.strip()
+    
+    # Validate tag format
+    if not validate_tag_format(tag):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": f"Invalid tag format: '{tag}'. Expected format: A1, BR-1, MT-05, etc."}
+        )
+    
+    # Validate description
+    if not description:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "Description cannot be empty"}
+        )
+    
+    # Add to dictionary
+    TAG_DESCRIPTIONS[tag] = description
+    
+    # Save to file
+    if save_tags_to_file():
+        return {"success": True, "message": f"Tag '{tag}' added successfully", "tag": tag}
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": "Failed to save tags to file"}
+        )
+
+@app.delete("/api/tags/{tag}")
+async def delete_tag(tag: str):
+    """Remove a tag"""
+    tag = tag.strip().upper()
+    
+    if tag not in TAG_DESCRIPTIONS:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "error": f"Tag '{tag}' not found"}
+        )
+    
+    # Remove from dictionary
+    del TAG_DESCRIPTIONS[tag]
+    
+    # Save to file
+    if save_tags_to_file():
+        return {"success": True, "message": f"Tag '{tag}' removed successfully"}
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": "Failed to save tags to file"}
+        )
+
+@app.post("/api/tags/upload-csv")
+async def upload_tags_csv(file: UploadFile = File(...)):
+    """Bulk upload tags from CSV file"""
+    if not file.filename.endswith('.csv'):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "File must be a CSV"}
+        )
+    
+    try:
+        # Read CSV content
+        content = await file.read()
+        decoded = content.decode('utf-8')
+        csv_reader = csv.DictReader(decoded.splitlines())
+        
+        added_count = 0
+        updated_count = 0
+        errors = []
+        
+        for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (1 is header)
+            tag = row.get('tag', '').strip().upper()
+            description = row.get('description', '').strip()
+            
+            # Skip empty rows
+            if not tag:
+                continue
+            
+            # Validate tag format
+            if not validate_tag_format(tag):
+                errors.append(f"Row {row_num}: Invalid tag format '{tag}'")
+                continue
+            
+            # Validate description
+            if not description:
+                errors.append(f"Row {row_num}: Empty description for tag '{tag}'")
+                continue
+            
+            # Add or update tag
+            if tag in TAG_DESCRIPTIONS:
+                updated_count += 1
+            else:
+                added_count += 1
+            
+            TAG_DESCRIPTIONS[tag] = description
+        
+        # Save to file
+        if save_tags_to_file():
+            return {
+                "success": True,
+                "message": f"CSV processed: {added_count} tags added, {updated_count} updated",
+                "added": added_count,
+                "updated": updated_count,
+                "errors": errors
+            }
+        else:
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "error": "Failed to save tags to file"}
+            )
+    
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"Error processing CSV: {str(e)}"}
+        )
+
+@app.get("/api/tags/download-csv")
+async def download_tags_csv():
+    """Download current tags as CSV"""
+    try:
+        # Create CSV in memory
+        output = BytesIO()
+        output.write(b'\xef\xbb\xbf')  # UTF-8 BOM for Excel compatibility
+        
+        csv_content = "tag,description\n"
+        for tag, description in sorted(TAG_DESCRIPTIONS.items()):
+            # Escape quotes in description
+            desc_escaped = description.replace('"', '""')
+            csv_content += f'{tag},"{desc_escaped}"\n'
+        
+        output.write(csv_content.encode('utf-8'))
+        output.seek(0)
+        
+        return FileResponse(
+            path=MATERIAL_DESCRIPTIONS_FILE,
+            filename="tags.csv",
+            media_type="text/csv"
+        ) if False else JSONResponse(
+            status_code=200,
+            content={"csv": csv_content},
+            headers={
+                "Content-Disposition": "attachment; filename=tags.csv"
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"Error generating CSV: {str(e)}"}
+        )
+
+# ========================================
+# TAG MANAGEMENT PAGE ROUTE
+# ========================================
+
+@app.get("/tag-management", response_class=HTMLResponse)
+async def tag_management_page(request: Request):
+    """Render tag management page"""
+    response = templates.TemplateResponse("tag-management.html", {
+        "request": request,
+        "tag_count": len(TAG_DESCRIPTIONS)
+    })
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 if __name__ == "__main__":

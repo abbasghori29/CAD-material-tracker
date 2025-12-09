@@ -11,6 +11,8 @@ AI-powered web application for extracting material tags from CAD drawings using 
 - **AI-Powered Detection**: Uses Roboflow to automatically detect CAD drawings on PDF pages
 - **Real-time Processing**: Live WebSocket updates showing progress as pages are processed
 - **OCR Extraction**: Extracts material tags (e.g., `BR-1`, `FCL-2`, `MC-1`) from detected drawings
+- **Tag Management**: Add, remove, and manage detection tags through a modern web interface
+- **CSV Import/Export**: Bulk upload tags via CSV or download current tags as template
 - **Beautiful UI**: Modern dark-themed interface with live previews and statistics
 - **Export Results**: Download extracted material tags as CSV
 - **Fast & Efficient**: Processes only detected drawing regions, not entire pages
@@ -200,6 +202,28 @@ You should see the CAD Material Tracker interface.
 
 ## Usage
 
+### Managing Tags
+
+Before processing PDFs, you can manage which tags the system detects:
+
+1. **Access Tag Management**: Click the "Manage Tags" button in the header
+2. **View Tags**: See all currently configured tags in a sortable table
+3. **Add Single Tag**: 
+   - Enter tag ID (e.g., `GL-10`, `BR-1`, `MT-05`)
+   - Enter description (e.g., "Tempered Glass Window")
+   - Click "Add Tag"
+4. **Bulk Upload via CSV**:
+   - Click "Download Template" to get the CSV format
+   - Edit CSV with your tags: `tag,description`
+   - Click "Upload CSV File" and select your file
+   - System validates and imports all tags
+5. **Remove Tags**: Click the "Delete" button next to any tag to remove it
+6. **Download Tags**: Click "Download Template" to export all current tags as CSV
+
+> **Note**: After adding or removing tags, restart the server for changes to take effect in the detection system.
+
+### Processing PDFs
+
 1. **Upload PDF**: Drag and drop your CAD drawings PDF or click to browse
 2. **Configure Pages** (optional): Set start and end page numbers, or leave empty to process all pages
 3. **Start Processing**: Click "Start Processing" to begin extraction
@@ -215,8 +239,9 @@ You should see the CAD Material Tracker interface.
 Archive/
 ├── app.py                      # FastAPI backend application
 ├── templates/
-│   └── index.html             # Web UI template
-├── material_descriptions.json  # Material tag descriptions
+│   ├── index.html             # Main web UI
+│   └── tag-management.html    # Tag management interface
+├── material_descriptions.json  # Material tag descriptions (managed via UI)
 ├── requirements.txt            # Python dependencies
 ├── .gitignore                  # Git ignore rules
 ├── uploads/                    # Uploaded PDF files (auto-created)
@@ -234,9 +259,17 @@ Archive/
 | `ROBOFLOW_API_KEY` | Your Roboflow API key | Yes |
 | `ROBOFLOW_MODEL_ID` | Roboflow model ID | Yes |
 
-### Material Descriptions
+### Material Tags
 
-The `material_descriptions.json` file contains mappings of material tags to their descriptions. Format:
+Tags are now managed through the web interface at `/tag-management`. The system stores tags in `material_descriptions.json`.
+
+**Tag Format Rules:**
+- 1-3 uppercase letters
+- Optional dash (`-`) or underscore (`_`)
+- 1-2 digits
+- Examples: `A1`, `BR-1`, `MT-05`, `FCL-2`, `GL_10`
+
+You can also manually edit `material_descriptions.json` if needed:
 
 ```json
 {
@@ -256,11 +289,20 @@ The `material_descriptions.json` file contains mappings of material tags to thei
 
 ## API Endpoints
 
+### Main Application
 - `GET /` - Main web interface
+- `GET /tag-management` - Tag management interface
 - `POST /upload` - Upload PDF file
 - `POST /process` - Start processing (via WebSocket)
 - `WebSocket /ws` - Real-time updates
 - `GET /download` - Download results CSV
+
+### Tag Management API
+- `GET /api/tags` - List all tags
+- `POST /api/tags` - Add a single tag
+- `DELETE /api/tags/{tag}` - Remove a tag
+- `POST /api/tags/upload-csv` - Bulk upload tags from CSV
+- `GET /api/tags/download-csv` - Download current tags as CSV
 
 ## AWS EC2 Deployment (CI/CD)
 
