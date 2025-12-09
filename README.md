@@ -10,7 +10,9 @@ AI-powered web application for extracting material tags from CAD drawings using 
 
 - **AI-Powered Detection**: Uses Roboflow to automatically detect CAD drawings on PDF pages
 - **Real-time Processing**: Live WebSocket updates showing progress as pages are processed
-- **OCR Extraction**: Extracts material tags (e.g., `BR-1`, `FCL-2`, `MC-1`) from detected drawings
+- **OCR Extraction**: Extracts material tags (e.g., `BR-1`, `FCL-2`, `MC-1`) using **EasyOCR** (Deep Learning) for superior accuracy on noisy CAD drawings
+- **Advanced Deduplication**: Intelligent algorithms to prevent duplicate tags within drawings and overlapping detection regions
+- **Cost Optimization**: Smart processing only triggers expensive API calls when valid tags are found
 - **Tag Management**: Add, remove, and manage detection tags through a modern web interface
 - **CSV Import/Export**: Bulk upload tags via CSV or download current tags as template
 - **Beautiful UI**: Modern dark-themed interface with live previews and statistics
@@ -25,7 +27,7 @@ Before starting, ensure you have:
 - **Python 3.12** specifically ([Download Python 3.12](https://www.python.org/downloads/release/python-3120/))
   - **Why Python 3.12?** The Roboflow `inference-sdk` package (required for AI detection) only works with Python 3.12. This is a hard requirement, not optional.
 - Git (if cloning from repository)
-- Tesseract OCR ([Download here](https://github.com/UB-Mannheim/tesseract/wiki))
+- EasyOCR (automatically installed via requirements.txt)
 - Roboflow API key ([Get one here](https://roboflow.com))
 
 ### Installation Steps
@@ -83,32 +85,8 @@ pip install -r requirements.txt
 
 This will install all required packages including FastAPI, pdfplumber, Pillow, and others.
 
-#### Step 4: Install Tesseract OCR
-
-**Windows:**
-```bash
-# Using winget (recommended)
-winget install --id UB-Mannheim.TesseractOCR
-
-# Or download installer from:
-# https://github.com/UB-Mannheim/tesseract/wiki
-```
-
-**Mac:**
-```bash
-brew install tesseract
-```
-
-**Linux (Ubuntu/Debian):**
-```bash
-sudo apt-get update
-sudo apt-get install tesseract-ocr
-```
-
-**Verify Tesseract installation:**
-```bash
-tesseract --version
-```
+#### Step 4: Verify EasyOCR
+EasyOCR installs automatically with `pip`. On the first run, it will download necessary model files (~100MB). No manual system installation is required unlike Tesseract.
 
 #### Step 5: Configure Environment Variables
 
@@ -282,7 +260,7 @@ You can also manually edit `material_descriptions.json` if needed:
 ## Tech Stack
 
 - **Backend**: FastAPI, WebSockets
-- **AI/ML**: Roboflow (object detection), Tesseract OCR
+- **AI/ML**: Roboflow (object detection), EasyOCR (text extraction)
 - **Frontend**: HTML5, CSS3, JavaScript, Lucide Icons
 - **Image Processing**: PIL/Pillow
 - **PDF Processing**: pdfplumber
@@ -358,37 +336,13 @@ sudo systemctl restart nginx
 
 ## Troubleshooting
 
-### Tesseract not found
-- Ensure Tesseract is installed and in your PATH
-- On Windows, the app auto-detects common installation paths
-- On Linux/EC2, Tesseract is built from source at `/usr/local/bin/tesseract`
-- Verify installation: `tesseract --version`
+### EasyOCR Slow Startup
+- On the very first run, EasyOCR downloads model files. This can take 1-2 minutes. Subsequent runs are faster.
+- Ensure you have a stable internet connection for the first run.
 
-### Roboflow errors
-- Check your API key in `.env` file
-- Verify model ID is correct
-- Check your Roboflow account has API access
-
-### No drawings detected
-- Ensure PDF contains CAD drawings
-- Try different pages (some pages may not have drawings)
-- Check Roboflow model confidence threshold (default: 0.8)
-
-### WebSocket disconnects (EC2)
-- The CI/CD configures 24-hour WebSocket timeouts
-- If still disconnecting, check Nginx logs: `sudo tail -f /var/log/nginx/error.log`
-- Verify service is running: `sudo systemctl status cad-tracker`
-
-### Large file upload fails
-- Maximum file size is 2GB
-- Upload timeout is 2 hours
-- Check Nginx logs for errors
-- Ensure EC2 has enough disk space: `df -h`
-
-### OCR returns empty results (EC2)
-- Verify Tesseract path: `which tesseract` (should be `/usr/local/bin/tesseract`)
-- Check language data: `ls /usr/local/share/tessdata/`
-- Service must have `TESSDATA_PREFIX` environment variable set
+### OCR returns empty results
+- Check lighting/contrast of the drawing. EasyOCR is robust but very blurry text may fail.
+- Check debug logs to see if tags are being detected but filtered out due to low confidence.
 
 ### Service crashes repeatedly
 - Check logs: `sudo journalctl -u cad-tracker -n 100`

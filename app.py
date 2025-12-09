@@ -249,9 +249,11 @@ for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER, RESULTS_FOLDER, "static", "template
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = 500_000_000
 
-# Tag patterns
-TAG_PATTERN = re.compile(r'\b([A-Z]{1,3}[-_]?\d{1,2})\b', re.IGNORECASE)
+# Regex for tags (e.g. WD-01, A-101, C2)
+# Allow case-insensitive matching in regex, and handle potential spacing issues
+TAG_PATTERN = re.compile(r'(?i)[A-Z]{1,3}\s*[-_]?\s*[0-9]{1,3}')
 SHEET_PATTERN = re.compile(r'\b([A-Z]\d{3})\b')
+print(f"Tag Pattern: {TAG_PATTERN.pattern}")
 
 # Roboflow setup
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "")
@@ -271,39 +273,25 @@ try:
 except ImportError:
     pass
 
-# Tesseract setup - works on both Windows and Linux
+# EasyOCR setup
+import numpy as np
+try:
+    import easyocr
+    # Initialize reader once (using CPU for reliability unless configured otherwise)
+    # This might take a moment to load model on startup
+    print("Initializing EasyOCR...")
+    READER = easyocr.Reader(['en'], gpu=False) 
+    print("EasyOCR initialized successfully")
+except ImportError:
+    READER = None
+    print("WARNING: easyocr not installed")
+
+# Tesseract - Deprecated/Fallback
 try:
     import pytesseract
-    import shutil
-    
-    # Common installation paths for Windows and Linux
-    tesseract_paths = [
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # Windows default
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",  # Windows x86
-        "/usr/local/bin/tesseract",  # Linux (compiled from source on EC2)
-        "/usr/bin/tesseract",  # Linux (package manager)
-        "/opt/homebrew/bin/tesseract",  # macOS Homebrew ARM
-        "/usr/local/Cellar/tesseract/*/bin/tesseract",  # macOS Homebrew Intel
-    ]
-    
-    tesseract_found = False
-    for path in tesseract_paths:
-        if os.path.exists(path):
-            pytesseract.pytesseract.tesseract_cmd = path
-            tesseract_found = True
-            print(f"Tesseract found at: {path}")
-            break
-    
-    # Fallback: check if tesseract is in system PATH
-    if not tesseract_found:
-        tesseract_in_path = shutil.which("tesseract")
-        if tesseract_in_path:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_in_path
-            print(f"Tesseract found in PATH: {tesseract_in_path}")
-        else:
-            print("WARNING: Tesseract not found! OCR will not work.")
+    # ... (Keeping imports just in case of revert, but READER is primary)
 except ImportError:
-    print("WARNING: pytesseract not installed")
+    pass
 
 # FastAPI app
 app = FastAPI(title="CAD Material Tracker")
@@ -406,6 +394,8 @@ def detect_drawings_on_page(page, page_num: int):
         cropped_images = []
         
         if 'predictions' in result:
+            # Step 1: Collect all valid detections
+            raw_detections = []
             for pred in result['predictions']:
                 if pred.get('class') == 'drawing' and pred.get('confidence', 0) > 0.8:
                     x, y = pred['x'] * scale_x, pred['y'] * scale_y
@@ -414,17 +404,58 @@ def detect_drawings_on_page(page, page_num: int):
                     x2, y2 = min(orig_width, x + w/2), min(orig_height, y + h/2)
                     
                     if x2 > x1 and y2 > y1:
-                        drawings.append({
+                        raw_detections.append({
                             "bbox": (x1, y1, x2, y2),
                             "confidence": pred.get('confidence', 0)
                         })
-                        # Crop the drawing region
-                        cropped = img_original.crop((int(x1), int(y1), int(x2), int(y2)))
-                        cropped_images.append({
-                            "image": cropped,
-                            "confidence": pred.get('confidence', 0),
-                            "bbox": (int(x1), int(y1), int(x2), int(y2))
-                        })
+
+            # Step 2: Apply Non-Maximum Suppression (NMS)
+            # Sort by confidence descending
+            raw_detections.sort(key=lambda x: x['confidence'], reverse=True)
+            
+            final_detections = []
+            while raw_detections:
+                current = raw_detections.pop(0)
+                final_detections.append(current)
+                
+                # Compare with remaining detections
+                # If overlap is high (IoU > 0.5), discard the lower confidence one
+                keep = []
+                c_x1, c_y1, c_x2, c_y2 = current['bbox']
+                area_current = (c_x2 - c_x1) * (c_y2 - c_y1)
+                
+                for other in raw_detections:
+                    o_x1, o_y1, o_x2, o_y2 = other['bbox']
+                    
+                    # Calculate intersection
+                    ix1 = max(c_x1, o_x1)
+                    iy1 = max(c_y1, o_y1)
+                    ix2 = min(c_x2, o_x2)
+                    iy2 = min(c_y2, o_y2)
+                    
+                    if ix2 > ix1 and iy2 > iy1:
+                        area_inter = (ix2 - ix1) * (iy2 - iy1)
+                        area_other = (o_x2 - o_x1) * (o_y2 - o_y1)
+                        union = area_current + area_other - area_inter
+                        iou = area_inter / union if union > 0 else 0
+                        
+                        if iou < 0.3:  # Threshold for overlap (30%)
+                            keep.append(other)
+                    else:
+                        keep.append(other)
+                
+                raw_detections = keep
+
+            # Step 3: Create final objects
+            for d in final_detections:
+                x1, y1, x2, y2 = d['bbox']
+                drawings.append(d)
+                cropped = img_original.crop((int(x1), int(y1), int(x2), int(y2)))
+                cropped_images.append({
+                    "image": cropped,
+                    "confidence": d['confidence'],
+                    "bbox": (int(x1), int(y1), int(x2), int(y2))
+                })
         
         # Draw boxes on full page image (RED color)
         img_annotated = img_original.copy()
@@ -444,115 +475,46 @@ def detect_drawings_on_page(page, page_num: int):
 
 
 def ocr_image(img: Image.Image) -> str:
-    """OCR an image with advanced preprocessing for CAD drawings - optimized for material tags"""
-    try:
-        from pytesseract import image_to_string
-        
-        # Convert to grayscale
-        if img.mode != 'L':
-            img_gray = img.convert('L')
-        else:
-            img_gray = img.copy()
-        
-        # CRITICAL: Scale up small images (OCR works better on larger text)
-        width, height = img_gray.size
-        min_dimension = 1200  # Minimum dimension for good OCR
-        if width < min_dimension or height < min_dimension:
-            scale = max(min_dimension / width, min_dimension / height)
-            new_size = (int(width * scale), int(height * scale))
-            img_gray = img_gray.resize(new_size, Image.Resampling.LANCZOS)
-        
-        # Aggressive contrast enhancement
-        img_enhanced = ImageEnhance.Contrast(img_gray).enhance(3.5)
-        img_enhanced = ImageEnhance.Brightness(img_enhanced).enhance(1.1)
-        
-        # Auto-contrast for better text visibility
-        img_enhanced = ImageOps.autocontrast(img_enhanced, cutoff=5)
-        
-        # Sharpen to make text edges crisp
-        img_enhanced = img_enhanced.filter(ImageFilter.SHARPEN)
-        img_enhanced = img_enhanced.filter(ImageFilter.EDGE_ENHANCE_MORE)
-        
-        # Remove noise
-        img_enhanced = img_enhanced.filter(ImageFilter.MedianFilter(size=3))
-        
-        # Try multiple OCR strategies and combine
-        results = []
-        char_whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_'
-        
-        # Strategy 1: Sparse text with character whitelist (best for material tags)
+    """OCR an image with EasyOCR - optimized for CAD drawings"""
+    if READER is None:
         try:
-            text1 = image_to_string(
-                img_enhanced,
-                config=f'--psm 11 --oem 3 -c tessedit_char_whitelist={char_whitelist}'
-            )
-            if text1.strip():
-                results.append(text1.strip())
-        except Exception as e:
-            print(f"[OCR] Strategy 1 failed: {e}")
-        
-        # Strategy 2: Single word mode (for individual tags like "A1", "B2")
-        try:
-            text2 = image_to_string(
-                img_enhanced,
-                config=f'--psm 8 --oem 3 -c tessedit_char_whitelist={char_whitelist}'
-            )
-            if text2.strip() and text2.strip() not in results:
-                results.append(text2.strip())
-        except:
-            pass
-        
-        # Strategy 3: Use LSTM neural network (slower but more accurate)
-        try:
-            text3 = image_to_string(
-                img_enhanced,
-                config=f'--psm 11 --oem 1 -c tessedit_char_whitelist={char_whitelist}'
-            )
-            if text3.strip() and text3.strip() not in results:
-                results.append(text3.strip())
-        except:
-            pass
-        
-        # Strategy 4: Try inverted image (some CAD drawings have white text on dark)
-        try:
-            img_inverted = ImageOps.invert(img_enhanced)
-            text4 = image_to_string(
-                img_inverted,
-                config=f'--psm 11 --oem 3 -c tessedit_char_whitelist={char_whitelist}'
-            )
-            if text4.strip() and text4.strip() not in results:
-                results.append(text4.strip())
-        except:
-            pass
-        
-        # Combine all unique results
-        combined = ' '.join(set(results)).strip()
-        
-        # Clean up common OCR misreads
-        replacements = {
-            '|': 'I',  # Pipe to I
-            '0': 'O',  # Zero to O (context-dependent, but helps)
-            '1': 'I',  # One to I (for tags like "A1" vs "AI")
-            '5': 'S',  # Five to S
-            '8': 'B',  # Eight to B
-        }
-        for old, new in replacements.items():
-            combined = combined.replace(old, new)
-        
-        return combined if combined else ""
-        
-    except Exception as e:
-        print(f"[OCR] Error: {type(e).__name__}: {e}")
-        # Fallback to simple OCR
-        try:
+            from pytesseract import image_to_string
+            # Fallback to Tesseract if EasyOCR failed to load
             if img.mode != 'L':
                 img = img.convert('L')
-            img = ImageEnhance.Contrast(img).enhance(2.0)
-            img = img.filter(ImageFilter.SHARPEN)
-            from pytesseract import image_to_string
-            return image_to_string(img, config='--psm 11 --oem 3')
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(2.0)
+            return image_to_string(img)
         except:
             return ""
+
+    try:
+        # EasyOCR Preprocessing
+        # 1. Grayscale
+        if img.mode != 'L':
+            img = img.convert('L')
+            
+        # 2. Upscale small images to help detection
+        width, height = img.size
+        if width < 1500 or height < 1500:
+             scale_factor = 2
+             new_size = (width * scale_factor, height * scale_factor)
+             img = img.resize(new_size, Image.Resampling.LANCZOS)
+             
+        # 3. Convert to numpy for EasyOCR
+        img_np = np.array(img)
+        
+        # 4. Extract text
+        # detail=0 returns simple list of strings
+        # workers=0 runs on main thread to avoid pickling issues if any
+        results = READER.readtext(img_np, detail=0)
+        
+        text = " ".join(results)
+        return text
+        
+    except Exception as e:
+        print(f"EasyOCR error: {e}")
+        return ""
 
 
 def extract_location_description(img: Image.Image) -> str:
@@ -700,43 +662,86 @@ async def process_pdf_with_job(job: JobState):
     """Process PDF as a background job - independent of WebSocket"""
     job.status = JobStatus.RUNNING
     print(f"[JOB-{job.job_id}] Starting PDF processing: {job.pdf_path}")
+    print(f"[JOB-{job.job_id}] TAG_DESCRIPTIONS has {len(TAG_DESCRIPTIONS)} tags: {list(TAG_DESCRIPTIONS.keys())}")
     results = []
-    
-    # Reload tags from file to pick up any changes made via tag management
-    global TAG_DESCRIPTIONS
-    if os.path.exists(MATERIAL_DESCRIPTIONS_FILE):
-        try:
-            with open(MATERIAL_DESCRIPTIONS_FILE, "r", encoding="utf-8") as f:
-                TAG_DESCRIPTIONS = json.load(f)
-            print(f"[JOB-{job.job_id}] Loaded {len(TAG_DESCRIPTIONS)} tags from {MATERIAL_DESCRIPTIONS_FILE}")
-        except Exception as e:
-            print(f"[JOB-{job.job_id}] Warning: Failed to reload tags: {e}")
-    
     target_tags = list(TAG_DESCRIPTIONS.keys())
+    print(f"[JOB-{job.job_id}] Target tags for detection: {target_tags}")
     
     await job.broadcast({"type": "start", "message": "Starting extraction..."})
     
     def process_ocr_and_tags(text, conf, sheet, page_num, location_desc):
         """Process OCR text to find tags (runs in thread)"""
-        found_tags = TAG_PATTERN.findall(text)
+        # Clean text for better matching (normalize spaces)
+        text_clean = " ".join(text.split())
+        found_tags_raw = TAG_PATTERN.findall(text_clean)
+        
+        if found_tags_raw:
+             debug_msg = f"P{page_num} Candidates: {found_tags_raw}"
+             print(f"[JOB-{job.job_id}] {debug_msg}")
+             # We can't await inside this thread, so we just print. 
+             # To show in UI, we'd need to change how this runs or queue messages.
+             # Actually, this runs in a thread executor, so we can't broadcast easily without an event loop.
+             # Let's append to a list that the main loop checks/sends, OR just trust print for now?
+             # Wait, the user said they CAN'T see terminal logs.
+             # I must capture these results and return them in drawing_results so the main loop can log them.
+             pass
+        
+        found_tags = []
+        # Normalize found tags (remove spaces)
+        seen_raw_tags = set()
+        for t in found_tags_raw:
+            norm_tag = t.replace(" ", "")
+            if norm_tag not in seen_raw_tags:
+                found_tags.append(norm_tag)
+                seen_raw_tags.add(norm_tag)
+
         matched_tags = []
         drawing_results = []
         
+        # Deduplicate: Only report each unique tag ONCE per drawing
+        seen_tags_in_drawing = set()
+        
+        # Capture OCR text sample for debugging UI
+        ocr_sample = text_clean[:50] + "..." if len(text_clean) > 50 else text_clean
+        
         for tag in found_tags:
             tag_upper = tag.upper()
-            for t in [tag_upper, tag_upper.replace('O', '0'), tag_upper.replace('0', 'O')]:
+            # Try variations
+            variations = [tag_upper, tag_upper.replace('O', '0'), tag_upper.replace('0', 'O')]
+            
+            # Check against target_tags
+            match_found = False
+            for t in variations:
                 if t in target_tags:
+                    # Deduplication check
+                    if t in seen_tags_in_drawing:
+                        match_found = True # Recognized, but already added
+                        break
+                        
+                    seen_tags_in_drawing.add(t)
                     matched_tags.append(t)
+                    # Use a special debug flag in the result to show in UI log
                     drawing_results.append({
                         "material": t,
                         "description": TAG_DESCRIPTIONS.get(t, "Unknown"),
                         "sheet": sheet,
                         "page": page_num,
                         "confidence": f"{conf:.0%}",
-                        "location": location_desc
+                        "location": location_desc,
+                        "_debug_match": True 
                     })
+                    match_found = True
                     break
-        
+            
+            if not match_found and len(found_tags_raw) < 5:
+                 # Return a "debug" result that isn't a real match but logs to UI
+                 drawing_results.append({
+                     "_debug_ignored": True,
+                     "tag": tag_upper,
+                     "variations": variations,
+                     "ocr_text": ocr_sample
+                 })
+
         return matched_tags, drawing_results
     
     try:
@@ -840,33 +845,89 @@ async def process_pdf_with_job(job: JobState):
                             "message": f"Analyzing drawing {i + 1}/{num_drawings}..."
                         })
                         
-                        # Step 1: Get location from OpenAI (sequential)
-                        location_desc = ""
-                        if OPENAI_AVAILABLE:
+                        # Step 1: Run OCR First (sequential)
+                        try:
+                            await job.broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
+                            print(f"[JOB-{job.job_id}] Starting OCR for drawing {i+1}")
+                            text = await asyncio.to_thread(ocr_image, cropped_img)
+                            print(f"[JOB-{job.job_id}] OCR complete: {len(text)} chars")
+                            
+                            # Log raw OCR for debugging
+                            cleaned_snippet = text.replace('\n', ' ')[:100]
+                            await job.broadcast({
+                                "type": "log",
+                                "level": "info", 
+                                "message": f"RAW OCR OUT: {cleaned_snippet}..."
+                            })
+
+                        except Exception as e:
+                            print(f"[JOB-{job.job_id}] OCR ERROR: {type(e).__name__}: {e}")
+                            text = ""
+                        
+                        # Step 2: Check for tags
+                        # Run OCR and tag matching in thread
+                        location_desc = "" # Default empty
+                        temp_results = []
+                        
+                        matched_tags, drawing_results = await asyncio.to_thread(
+                            process_ocr_and_tags, text, conf, sheet, page_num, "" # Pass empty location first
+                        )
+                        
+                        # Step 3: Run OpenAI ONLY if tags found
+                        valid_tags_exist = any(not r.get("_debug_ignored") for r in drawing_results)
+                        
+                        if valid_tags_exist and OPENAI_AVAILABLE:
                             try:
-                                await job.broadcast({"type": "log", "level": "info", "message": f"Extracting location..."})
+                                await job.broadcast({"type": "log", "level": "info", "message": f"Tags found! Extracting location..."})
                                 print(f"[JOB-{job.job_id}] Starting OpenAI call for drawing {i+1}")
                                 location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
                                 print(f"[JOB-{job.job_id}] OpenAI call complete: {location_desc[:50] if location_desc else 'empty'}")
                             except Exception as e:
                                 print(f"[JOB-{job.job_id}] OpenAI ERROR: {type(e).__name__}: {e}")
                                 await job.broadcast({"type": "log", "level": "warning", "message": f"Location extraction failed"})
+                        elif not valid_tags_exist:
+                             await job.broadcast({"type": "log", "level": "info", "message": f"No tags, skipping location extraction"})
+
+                        # Step 4: Update results with location and drawing index
+                        for r in drawing_results:
+                            r['location'] = location_desc
+                            r['drawing_index'] = i + 1
+                            
+                        # Process results including debug logs
+                        valid_results = []
+                        for result in drawing_results:
+                            if result.get("_debug_ignored"):
+                                # This is a debug message for ignored tags
+                                await job.broadcast({
+                                    "type": "log", 
+                                    "level": "warning", 
+                                    "message": f"🔍 OCR saw '{result['tag']}' but matched none of {len(target_tags)} tags (OCR: '{result['ocr_text']}')"
+                                })
+                            elif result.get("_debug_match"):
+                                # This is a successful match debug info
+                                # Remove the internal flag before adding
+                                del result["_debug_match"]
+                                valid_results.append(result)
+                                await job.broadcast({
+                                    "type": "log", 
+                                    "level": "success", 
+                                    "message": f"✅ MATCHED: {result['material']} in drawing {i+1} (Page {page_num})"
+                                })
+                                
+                                # Send structured event for UI update
+                                await job.broadcast({
+                                    "type": "tag_match",
+                                    "page": page_num,
+                                    "drawing_index": i + 1,
+                                    "tag": result['material'],
+                                    "description": result.get('description', '')
+                                })
+                            else:
+                                valid_results.append(result)
                         
-                        # Step 2: Run OCR (sequential)
-                        try:
-                            await job.broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
-                            print(f"[JOB-{job.job_id}] Starting OCR for drawing {i+1}")
-                            text = await asyncio.to_thread(ocr_image, cropped_img)
-                            print(f"[JOB-{job.job_id}] OCR complete: {len(text)} chars")
-                        except Exception as e:
-                            print(f"[JOB-{job.job_id}] OCR ERROR: {type(e).__name__}: {e}")
-                            text = ""
-                        
-                        # Process tags
-                        matched_tags, drawing_results = process_ocr_and_tags(
-                            text, conf, sheet, page_num, location_desc
-                        )
-                        
+                        if valid_results:
+                            job.results.extend(valid_results)
+                            
                         if location_desc:
                             await job.broadcast({
                                 "type": "log",
@@ -914,12 +975,34 @@ async def process_pdf_with_job(job: JobState):
                 # Small delay to allow GC to complete
                 await asyncio.sleep(0.1)
             
+            # Filter valid results ONLY
+            final_results = []
+            seen_in_final = set() # Extra safety against duplicates
+            
+            for r in results:
+                # 1. Skip debug objects
+                if r.get("_debug_ignored") or r.get("_debug_match"):
+                    continue
+                
+                # 2. Strict validation - must have material and sheet
+                if not r.get("material") or not r.get("sheet"):
+                    continue
+                    
+                # 3. Final Deduplication
+                # Create a signature: material + sheet + page + drawing_index
+                # We use drawing_index to ensure we don't merge different physical locations
+                sig = f"{r['material']}-{r['sheet']}-{r['page']}-{r.get('drawing_index', '0')}"
+                if sig in seen_in_final:
+                    continue
+                seen_in_final.add(sig)
+                final_results.append(r)
+            
             # Save results
             csv_path = os.path.join(RESULTS_FOLDER, "results.csv")
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(["Count", "Material", "Description", "Sheet", "Page", "Confidence", "Location"])
-                for i, r in enumerate(results, 1):
+                for i, r in enumerate(final_results, 1):
                     writer.writerow([i, r["material"], r["description"], r["sheet"], r["page"], r["confidence"], r.get("location", "")])
             
             # Job completed successfully
@@ -928,12 +1011,12 @@ async def process_pdf_with_job(job: JobState):
             
             await job.broadcast({
                 "type": "complete",
-                "total_tags": len(results),
-                "results": results,
+                "total_tags": len(final_results),
+                "results": final_results,
                 "job_id": job.job_id
             })
             
-            print(f"[JOB-{job.job_id}] COMPLETED - {len(results)} tags found")
+            print(f"[JOB-{job.job_id}] COMPLETED - {len(final_results)} unique tags found")
             
     except Exception as e:
         job.status = JobStatus.FAILED
@@ -974,6 +1057,128 @@ async def home(request: Request):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+@app.post("/upload-tags")
+async def upload_tags(file: UploadFile = File(...)):
+    """Upload CSV or XLSX file with tag list"""
+    try:
+        # Check file extension
+        filename = file.filename.lower()
+        if not (filename.endswith('.csv') or filename.endswith('.xlsx')):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "File must be CSV or XLSX format"}
+            )
+        
+        tags_dict = {}
+        
+        if filename.endswith('.csv'):
+            # Parse CSV
+            content = await file.read()
+            decoded = content.decode('utf-8')
+            csv_reader = csv.DictReader(decoded.splitlines())
+            
+            for row in csv_reader:
+                tag = row.get('tag', '').strip().upper()
+                description = row.get('description', '').strip()
+                
+                if tag and description:
+                    tags_dict[tag] = description
+        
+        elif filename.endswith('.xlsx'):
+            # Parse XLSX
+            try:
+                import openpyxl
+                from openpyxl import load_workbook
+            except ImportError:
+                return JSONResponse(
+                    status_code=500,
+                    content={"success": False, "error": "XLSX support not installed. Please use CSV format."}
+                )
+            
+            content = await file.read()
+            wb = load_workbook(BytesIO(content))
+            ws = wb.active
+            
+            # Assuming first row is header
+            headers = [cell.value for cell in ws[1]]
+            tag_col = headers.index('tag') if 'tag' in headers else 0
+        # Use pandas for robust CSV/XLSX reading
+        import pandas as pd
+        from io import BytesIO
+
+        try:
+            # Debug: Check file size and content
+            await file.seek(0)
+            content = await file.read()
+            file_size = len(content)
+            print(f"Received file: {file.filename}, Size: {file_size} bytes")
+            if file_size < 10:
+                print(f"WARNING: Tiny file content: {content}")
+            
+            # Reset cursor for pandas
+            file.file.seek(0)
+
+            if file.filename.endswith('.csv'):
+                try:
+                    # Try reading with python engine to auto-detect separator
+                    df = pd.read_csv(file.file, engine='python', sep=None, on_bad_lines='skip')
+                except Exception as e:
+                    print(f"CSV read error: {e}, trying default")
+                    file.file.seek(0)
+                    df = pd.read_csv(file.file)
+                
+                # If columns don't look like Tag/Description, assume headerless if 2 cols
+                # Check for various casings
+                cols_upper = [str(c).upper() for c in df.columns]
+                
+                if 'TAG' not in cols_upper:
+                     if len(df.columns) >= 2:
+                         # Assume headerless
+                         file.file.seek(0)
+                         df = pd.read_csv(file.file, header=None, names=['Tag', 'Description'])
+                     else:
+                         # Try to force rename first column
+                         df.rename(columns={df.columns[0]: 'Tag'}, inplace=True)
+                else:
+                    # Normalize headers
+                    df.columns = [str(c).strip().title() for c in df.columns]
+                    
+            else: # .xlsx
+                df = pd.read_excel(BytesIO(await file.read()))
+                
+            # Clean data
+            df['Tag'] = df['Tag'].astype(str).str.strip().str.upper() # Ensure uppercase for tags
+            if 'Description' in df.columns:
+                df['Description'] = df['Description'].fillna('Unknown').astype(str).str.strip()
+            else:
+                df['Description'] = 'Unknown'
+                
+            global TAG_DESCRIPTIONS
+            TAG_DESCRIPTIONS = pd.Series(df.Description.values, index=df.Tag).to_dict()
+            
+            # Remove any "nan" string keys or empty keys
+            TAG_DESCRIPTIONS = {k: v for k, v in TAG_DESCRIPTIONS.items() if k and k.lower() != 'nan'}
+            
+            print(f"Loaded {len(TAG_DESCRIPTIONS)} tags: {list(TAG_DESCRIPTIONS.keys())[:5]}...")
+            return {
+                "success": True,
+                "message": f"Loaded {len(TAG_DESCRIPTIONS)} tags successfully",
+                "tags": list(TAG_DESCRIPTIONS.keys()),
+                "count": len(TAG_DESCRIPTIONS)
+            }
+        except Exception as e:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": f"Error parsing file content: {str(e)}. Please ensure it's a valid CSV/XLSX with 'Tag' and 'Description' columns."}
+            )
+    
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"Error processing file: {str(e)}"}
+        )
 
 
 @app.post("/upload")
@@ -1200,207 +1405,6 @@ async def cleanup_endpoint():
         return {"success": True, "message": "Cleanup completed. Temporary files deleted (CSV results kept)."}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
-# ========================================
-# TAG MANAGEMENT API ENDPOINTS
-# ========================================
-
-MATERIAL_DESCRIPTIONS_FILE = "material_descriptions.json"
-
-def save_tags_to_file():
-    """Save TAG_DESCRIPTIONS to material_descriptions.json"""
-    try:
-        with open(MATERIAL_DESCRIPTIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(TAG_DESCRIPTIONS, f, indent=4, ensure_ascii=False)
-        print(f"[TAGS] Saved {len(TAG_DESCRIPTIONS)} tags to {MATERIAL_DESCRIPTIONS_FILE}")
-        return True
-    except Exception as e:
-        print(f"[TAGS] Error saving tags: {e}")
-        return False
-
-def validate_tag_format(tag: str) -> bool:
-    """Validate tag format (e.g., A1, BR-1, MT-05, FCL-2)"""
-    # Pattern: 1-3 letters, optional dash/underscore, 1-2 digits
-    pattern = re.compile(r'^[A-Z]{1,3}[-_]?\d{1,2}$', re.IGNORECASE)
-    return bool(pattern.match(tag))
-
-@app.get("/api/tags")
-async def get_all_tags():
-    """Get all tags and descriptions"""
-    tags = [{"tag": tag, "description": desc} for tag, desc in TAG_DESCRIPTIONS.items()]
-    return {"tags": tags, "count": len(tags)}
-
-@app.post("/api/tags")
-async def add_tag(tag: str = Form(...), description: str = Form(...)):
-    """Add a single tag with description"""
-    tag = tag.strip().upper()
-    description = description.strip()
-    
-    # Validate tag format
-    if not validate_tag_format(tag):
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "error": f"Invalid tag format: '{tag}'. Expected format: A1, BR-1, MT-05, etc."}
-        )
-    
-    # Validate description
-    if not description:
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "error": "Description cannot be empty"}
-        )
-    
-    # Add to dictionary
-    TAG_DESCRIPTIONS[tag] = description
-    
-    # Save to file
-    if save_tags_to_file():
-        return {"success": True, "message": f"Tag '{tag}' added successfully", "tag": tag}
-    else:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": "Failed to save tags to file"}
-        )
-
-@app.delete("/api/tags/{tag}")
-async def delete_tag(tag: str):
-    """Remove a tag"""
-    tag = tag.strip().upper()
-    
-    if tag not in TAG_DESCRIPTIONS:
-        return JSONResponse(
-            status_code=404,
-            content={"success": False, "error": f"Tag '{tag}' not found"}
-        )
-    
-    # Remove from dictionary
-    del TAG_DESCRIPTIONS[tag]
-    
-    # Save to file
-    if save_tags_to_file():
-        return {"success": True, "message": f"Tag '{tag}' removed successfully"}
-    else:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": "Failed to save tags to file"}
-        )
-
-@app.post("/api/tags/upload-csv")
-async def upload_tags_csv(file: UploadFile = File(...)):
-    """Bulk upload tags from CSV file"""
-    if not file.filename.endswith('.csv'):
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "error": "File must be a CSV"}
-        )
-    
-    try:
-        # Read CSV content
-        content = await file.read()
-        decoded = content.decode('utf-8')
-        csv_reader = csv.DictReader(decoded.splitlines())
-        
-        added_count = 0
-        updated_count = 0
-        errors = []
-        
-        for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 (1 is header)
-            tag = row.get('tag', '').strip().upper()
-            description = row.get('description', '').strip()
-            
-            # Skip empty rows
-            if not tag:
-                continue
-            
-            # Validate tag format
-            if not validate_tag_format(tag):
-                errors.append(f"Row {row_num}: Invalid tag format '{tag}'")
-                continue
-            
-            # Validate description
-            if not description:
-                errors.append(f"Row {row_num}: Empty description for tag '{tag}'")
-                continue
-            
-            # Add or update tag
-            if tag in TAG_DESCRIPTIONS:
-                updated_count += 1
-            else:
-                added_count += 1
-            
-            TAG_DESCRIPTIONS[tag] = description
-        
-        # Save to file
-        if save_tags_to_file():
-            return {
-                "success": True,
-                "message": f"CSV processed: {added_count} tags added, {updated_count} updated",
-                "added": added_count,
-                "updated": updated_count,
-                "errors": errors
-            }
-        else:
-            return JSONResponse(
-                status_code=500,
-                content={"success": False, "error": "Failed to save tags to file"}
-            )
-    
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": f"Error processing CSV: {str(e)}"}
-        )
-
-@app.get("/api/tags/download-csv")
-async def download_tags_csv():
-    """Download current tags as CSV"""
-    try:
-        # Create CSV in memory
-        output = BytesIO()
-        output.write(b'\xef\xbb\xbf')  # UTF-8 BOM for Excel compatibility
-        
-        csv_content = "tag,description\n"
-        for tag, description in sorted(TAG_DESCRIPTIONS.items()):
-            # Escape quotes in description
-            desc_escaped = description.replace('"', '""')
-            csv_content += f'{tag},"{desc_escaped}"\n'
-        
-        output.write(csv_content.encode('utf-8'))
-        output.seek(0)
-        
-        return FileResponse(
-            path=MATERIAL_DESCRIPTIONS_FILE,
-            filename="tags.csv",
-            media_type="text/csv"
-        ) if False else JSONResponse(
-            status_code=200,
-            content={"csv": csv_content},
-            headers={
-                "Content-Disposition": "attachment; filename=tags.csv"
-            }
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": f"Error generating CSV: {str(e)}"}
-        )
-
-# ========================================
-# TAG MANAGEMENT PAGE ROUTE
-# ========================================
-
-@app.get("/tag-management", response_class=HTMLResponse)
-async def tag_management_page(request: Request):
-    """Render tag management page"""
-    response = templates.TemplateResponse("tag-management.html", {
-        "request": request,
-        "tag_count": len(TAG_DESCRIPTIONS)
-    })
-    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    return response
 
 
 if __name__ == "__main__":

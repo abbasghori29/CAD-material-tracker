@@ -35,7 +35,8 @@
         }
 
         body {
-            font-family: 'Inter', sans-serif;
+            margin: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: var(--bg-dark);
             color: var(--text);
             min-height: 100vh;
@@ -146,9 +147,11 @@
         .upload-panel {
             width: 100%;
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
             padding: 40px;
+            gap: 24px;
         }
 
         .upload-card {
@@ -313,22 +316,22 @@
         }
 
         /* Upload Modal */
+        /* Results Modal */
         .modal-overlay {
-            display: none;
             position: fixed;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(0, 0, 0, 0.8);
-            backdrop-filter: blur(10px);
-            z-index: 1000;
-            align-items: center;
+            background: rgba(0, 0, 0, 0.85);
+            /* Darker backdrop */
+            backdrop-filter: blur(8px);
+            z-index: 2000;
+            /* Higher than processing view (1000) */
+            display: none;
             justify-content: center;
-        }
-
-        .modal-overlay.active {
-            display: flex;
+            align-items: center;
+            padding: 40px;
         }
 
         .modal-content {
@@ -381,21 +384,50 @@
 
         /* Processing View */
         .processing-view {
+            position: fixed;
+            /* Fixed to viewport */
+            top: 90px;
+            left: 20px;
+            right: 20px;
+            bottom: 20px;
             display: none;
-            width: 100%;
+            /* Still hidden by default */
+            background: var(--bg);
+            border-radius: 20px;
+            padding: 20px;
+            z-index: 1000;
+            overflow: auto;
+            /* Allow scrolling if screen is too small */
+            min-height: 500px;
+            /* Minimum height expectation */
         }
 
         .processing-view.active {
-            display: flex;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr;
+            gap: 20px;
+            /* Padding is now on the base .processing-view */
+            /* Height is now managed by top/bottom/left/right and overflow: auto */
+            /* Overflow is now on the base .processing-view */
+            height: auto;
+            /* Let content define height within fixed bounds */
+            overflow: visible;
+            /* Let the parent .processing-view handle scrolling */
         }
 
         /* Left Panel - Full Page Preview */
         .left-panel {
-            width: 55%;
-            border-right: 1px solid var(--border);
             display: flex;
             flex-direction: column;
             background: var(--bg-card);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+            min-width: 0;
+            /* Prevent grid blowout */
+            position: relative;
+            z-index: 1;
         }
 
         .panel-header {
@@ -405,6 +437,8 @@
             align-items: center;
             justify-content: space-between;
             background: var(--bg-elevated);
+            border-top-left-radius: 16px;
+            border-top-right-radius: 16px;
         }
 
         .panel-title {
@@ -427,7 +461,9 @@
             align-items: center;
             justify-content: center;
             background: var(--bg-dark);
-            overflow: hidden;
+            overflow: auto;
+            border-bottom-left-radius: 16px;
+            border-bottom-right-radius: 16px;
         }
 
         .preview-container img {
@@ -447,18 +483,45 @@
             opacity: 0.5;
         }
 
-        /* Right Panel - Detected Drawings */
+        /* Right Panel - Detected Drawings & Logs */
         .right-panel {
-            width: 45%;
             display: flex;
             flex-direction: column;
-            background: var(--bg-card);
+            gap: 20px;
+            /* Flex column to stack Drawings and Logs */
+            height: 100%;
+            /* Fill the grid cell */
+            overflow: hidden;
+            /* Let children handle scroll */
+            min-width: 0;
+            /* Prevent grid blowout */
+            position: relative;
+            z-index: 1;
+        }
+
+        /* New Tag Badge Styles */
+        .tag-badge {
+            background: rgba(0, 255, 157, 0.15);
+            color: var(--accent);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            border: 1px solid rgba(0, 255, 157, 0.3);
+            margin-right: 5px;
+            margin-bottom: 5px;
         }
 
         .drawings-scroll {
             flex: 1;
-            overflow-y: auto;
+            overflow-y: scroll;
+            /* Force scrollbar */
+            overflow-x: hidden;
             padding: 16px;
+            min-height: 0;
+            max-height: 100%;
         }
 
         .drawing-card {
@@ -537,9 +600,15 @@
 
         /* Bottom Logs */
         .logs-panel {
-            height: 180px;
+            flex: 0 0 180px;
+            /* Fixed height, don't grow or shrink */
             border-top: 1px solid var(--border);
             background: var(--bg-elevated);
+            border-radius: 16px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            /* Contain children */
         }
 
         .logs-header {
@@ -548,6 +617,9 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            flex-shrink: 0;
+            background: var(--bg-elevated);
+            /* Sticky appearance */
         }
 
         .logs-title {
@@ -556,11 +628,16 @@
         }
 
         .logs-container {
-            height: calc(100% - 45px);
-            overflow-y: auto;
-            padding: 10px 16px;
+            flex: 1;
+            overflow-y: scroll;
+            /* Force scrollbar */
+            overflow-x: hidden;
+            padding: 12px;
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
+            font-size: 0.85rem;
+            min-height: 0;
+            /* Critical for flex scrolling */
+            scroll-behavior: smooth;
         }
 
         .log-entry {
@@ -602,6 +679,9 @@
             padding: 12px 20px;
             background: var(--bg-dark);
             border-bottom: 1px solid var(--border);
+            border-top-left-radius: 16px;
+            border-top-right-radius: 16px;
+            flex-shrink: 0;
         }
 
         .stat {
@@ -626,6 +706,8 @@
         .progress-bar {
             height: 4px;
             background: var(--bg-dark);
+            border-bottom-left-radius: 16px;
+            border-bottom-right-radius: 16px;
         }
 
         .progress-fill {
@@ -636,11 +718,21 @@
         }
 
         /* Results Panel */
+        /* Results Panel - Full Page Overlay */
         .results-panel {
             display: none;
-            padding: 20px;
-            background: var(--bg-card);
-            border-top: 1px solid var(--border);
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100vw;
+            height: 100vh;
+            background: var(--bg-dark);
+            z-index: 3000;
+            /* Highest priority */
+            overflow-y: auto;
+            padding: 40px;
         }
 
         .results-panel.active {
@@ -774,18 +866,40 @@
                 <span class="logo-subtitle">AI-Powered Drawing Analysis</span>
             </div>
         </div>
-        <a href="/tag-management" class="manage-tags-btn">
-            <i data-lucide="settings" style="width:16px;height:16px"></i>
-            Manage Tags
-        </a>
     </div>
 
     <div class="main-container">
         <!-- Upload Panel -->
         <div class="upload-panel" id="upload-panel">
-            <div class="upload-card">
+            <!-- Step 1: Upload Tags CSV/XLSX -->
+            <div class="upload-card" id="tags-upload-card">
                 <div class="upload-card-title">
-                    <h2>Upload CAD Drawings</h2>
+                    <h2>Step 1: Upload Tag List</h2>
+                    <p>Upload CSV or XLSX file with tags to detect</p>
+                </div>
+
+                <div class="upload-zone" id="tags-dropzone">
+                    <input type="file" id="tags-file-input" accept=".csv,.xlsx">
+                    <div class="upload-icon"><i data-lucide="file-spreadsheet"
+                            style="width:64px;height:64px;color:var(--accent)"></i></div>
+                    <div class="upload-title">Drop CSV/XLSX Here</div>
+                    <div class="upload-subtitle">or click to browse • Format: tag,description</div>
+                </div>
+
+                <div class="file-selected" id="tags-file-selected" style="display: none;">
+                    <div class="file-icon"><i data-lucide="file-check"
+                            style="width:24px;height:24px;color:var(--success)"></i></div>
+                    <div class="file-info">
+                        <div class="file-name" id="tags-file-name"></div>
+                        <div class="file-pages" id="tags-count"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 2: Upload PDF (disabled until tags uploaded) -->
+            <div class="upload-card" id="pdf-upload-card" style="opacity: 0.5; pointer-events: none;">
+                <div class="upload-card-title">
+                    <h2>Step 2: Upload CAD Drawings</h2>
                     <p>Extract material tags from PDF drawings using AI</p>
                 </div>
 
@@ -823,60 +937,60 @@
                 </button>
             </div>
         </div>
+    </div>
 
-        <!-- Processing View -->
-        <div class="processing-view" id="processing-view">
-            <!-- Left: Full Page Preview -->
-            <div class="left-panel">
-                <div class="panel-header">
-                    <div class="panel-title"><i data-lucide="file-image" style="width:18px;height:18px"></i> Full Page
-                        Preview</div>
-                    <div class="page-info" id="page-info">Page 0 / 0</div>
-                </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progress-fill"></div>
-                </div>
-                <div class="preview-container" id="full-page-preview">
-                    <div class="preview-placeholder">
-                        <div class="icon"><i data-lucide="file-scan" style="width:48px;height:48px"></i></div>
-                        <div>Waiting for page...</div>
-                    </div>
+    <!-- Processing View -->
+    <div class="processing-view" id="processing-view">
+        <!-- Left: Full Page Preview -->
+        <div class="left-panel">
+            <div class="panel-header">
+                <div class="panel-title"><i data-lucide="file-image" style="width:18px;height:18px"></i> Full Page
+                    Preview</div>
+                <div class="page-info" id="page-info">Page 0 / 0</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <div class="preview-container" id="full-page-preview">
+                <div class="preview-placeholder">
+                    <div class="icon"><i data-lucide="file-scan" style="width:48px;height:48px"></i></div>
+                    <div>Waiting for page...</div>
                 </div>
             </div>
+        </div>
 
-            <!-- Right: Detected Drawings -->
-            <div class="right-panel">
-                <div class="panel-header">
-                    <div class="panel-title"><i data-lucide="scan" style="width:18px;height:18px"></i> Detected Drawings
-                    </div>
-                    <div class="page-info" id="drawing-count">0 drawings</div>
+        <!-- Right: Detected Drawings -->
+        <div class="right-panel">
+            <div class="panel-header">
+                <div class="panel-title"><i data-lucide="scan" style="width:18px;height:18px"></i> Detected Drawings
                 </div>
-                <div class="stats-bar">
-                    <div class="stat">
-                        <div class="stat-value" id="stat-pages">0</div>
-                        <div class="stat-label">Pages</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-value" id="stat-drawings">0</div>
-                        <div class="stat-label">Drawings</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-value" id="stat-tags">0</div>
-                        <div class="stat-label">Tags</div>
+                <div class="page-info" id="drawing-count">0 drawings</div>
+            </div>
+            <div class="stats-bar">
+                <div class="stat">
+                    <div class="stat-value" id="stat-pages">0</div>
+                    <div class="stat-label">Pages</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="stat-drawings">0</div>
+                    <div class="stat-label">Drawings</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="stat-tags">0</div>
+                    <div class="stat-label">Tags</div>
+                </div>
+            </div>
+            <div class="drawings-scroll" id="drawings-container">
+                <div style="text-align: center; color: var(--text-dim); padding: 40px;">
+                    Waiting for detections...
+                </div>
+            </div>
+            <div class="logs-panel">
+                <div class="logs-header">
+                    <div class="logs-title"><i data-lucide="terminal" style="width:16px;height:16px"></i> Live Logs
                     </div>
                 </div>
-                <div class="drawings-scroll" id="drawings-container">
-                    <div style="text-align: center; color: var(--text-dim); padding: 40px;">
-                        Waiting for detections...
-                    </div>
-                </div>
-                <div class="logs-panel">
-                    <div class="logs-header">
-                        <div class="logs-title"><i data-lucide="terminal" style="width:16px;height:16px"></i> Live Logs
-                        </div>
-                    </div>
-                    <div class="logs-container" id="logs-container"></div>
-                </div>
+                <div class="logs-container" id="logs-container"></div>
             </div>
         </div>
     </div>
@@ -965,6 +1079,28 @@
                             stats.pages = data.pages_processed;
                             stats.tags = data.results_count;
                             updateStats();
+                        } else if (data.type === 'tag_match') {
+                            // Update the specific drawing card with the found tag
+                            const drawingId = `drawing-${data.page}-${data.drawing_index}`;
+                            const drawingCard = document.getElementById(drawingId);
+
+                            if (drawingCard) {
+                                const tagContainer = drawingCard.querySelector('.drawing-tags');
+                                if (tagContainer) {
+                                    const tagBadge = document.createElement('span');
+                                    tagBadge.className = 'tag-badge';
+                                    tagBadge.innerHTML = `<i class="fas fa-tag"></i> ${data.tag}`;
+                                    tagContainer.appendChild(tagBadge);
+
+                                    // Remove empty state if present
+                                    const emptyState = tagContainer.querySelector('.tag-none');
+                                    if (emptyState) emptyState.remove();
+                                }
+                            }
+
+                            // Update global stats
+                            stats.tags++;
+                            updateStats();
                         } else if (data.type === 'error') {
                             addLog('error', data.message);
                             localStorage.removeItem('cad_tracker_job_id');
@@ -1005,7 +1141,51 @@
             }
         });
 
-        // File upload handlers
+        // Step 1: Tags CSV/XLSX upload handlers
+        const tagsDropzone = document.getElementById('tags-dropzone');
+        const tagsFileInput = document.getElementById('tags-file-input');
+        let tagsUploaded = false;
+
+        tagsDropzone.addEventListener('click', () => tagsFileInput.click());
+        tagsDropzone.addEventListener('dragover', (e) => { e.preventDefault(); tagsDropzone.classList.add('dragover'); });
+        tagsDropzone.addEventListener('dragleave', () => tagsDropzone.classList.remove('dragover'));
+        tagsDropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            tagsDropzone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleTagsUpload(e.dataTransfer.files[0]);
+        });
+        tagsFileInput.addEventListener('change', () => {
+            if (tagsFileInput.files.length) handleTagsUpload(tagsFileInput.files[0]);
+        });
+
+        async function handleTagsUpload(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload-tags', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (data.success) {
+                    document.getElementById('tags-file-selected').style.display = 'flex';
+                    document.getElementById('tags-file-name').textContent = file.name;
+                    document.getElementById('tags-count').textContent = `${data.count} tags loaded`;
+
+                    // Enable PDF upload (Step 2)
+                    document.getElementById('pdf-upload-card').style.opacity = '1';
+                    document.getElementById('pdf-upload-card').style.pointerEvents = 'auto';
+                    tagsUploaded = true;
+
+                    addLog('success', `✓ Loaded ${data.count} tags: ${data.tags.join(', ')}`);
+                } else {
+                    addLog('error', 'Tags upload failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                addLog('error', 'Tags upload failed: ' + error.message);
+            }
+        }
+
+        // Step 2: File upload handlers (PDF)
         const dropzone = document.getElementById('dropzone');
         const fileInput = document.getElementById('file-input');
         const uploadModal = document.getElementById('upload-modal');
@@ -1037,9 +1217,7 @@
                 uploadedFilePath = data.path;
                 totalPages = data.pages;
 
-                // Hide modal
-                uploadModal.classList.remove('active');
-
+                // Update UI but keep modal visible
                 document.getElementById('file-selected').style.display = 'flex';
                 document.getElementById('file-name').textContent = data.filename;
                 document.getElementById('file-pages').textContent = `${data.pages} pages`;
@@ -1047,6 +1225,11 @@
                 document.getElementById('start-btn').disabled = false;
 
                 addLog('info', `Uploaded: ${data.filename} (${data.pages} pages)`);
+
+                // Hide modal after a short delay to show completion
+                setTimeout(() => {
+                    uploadModal.classList.remove('active');
+                }, 500);
             } catch (error) {
                 uploadModal.classList.remove('active');
                 addLog('error', 'Upload failed: ' + error.message);
@@ -1054,8 +1237,12 @@
         }
 
         function startProcessing() {
+            // Hide upload panel and show processing view
             document.getElementById('upload-panel').style.display = 'none';
             document.getElementById('processing-view').classList.add('active');
+
+            // Prevent body scroll when processing view is active
+            document.body.style.overflow = 'hidden';
 
             currentDrawings = [];
             stats = { pages: 0, drawings: 0, tags: 0 };
@@ -1349,18 +1536,34 @@
         }
 
         function showResults(results) {
-            document.getElementById('results-panel').classList.add('active');
+            // Hide processing view entirely
+            document.querySelector('.processing-view').style.display = 'none';
+            document.body.style.overflow = 'auto'; // Re-enable scroll for results
+
+            // Show results panel as new page
+            const resultsPanel = document.getElementById('results-panel');
+            resultsPanel.classList.add('active');
+            resultsPanel.style.display = 'block'; // Ensure it's visible
+
+            // Scroll to top
+            window.scrollTo(0, 0);
+
             const tbody = document.getElementById('results-body');
-            tbody.innerHTML = results.map((r, i) => `
+            tbody.innerHTML = results.map((r, i) => {
+                // strict sanitization
+                const desc = (r.description && r.description !== 'undefined' && r.description !== 'Unknown') ? r.description : '';
+                const loc = (r.location && r.location !== 'undefined') ? r.location : '';
+
+                return `
                 <tr>
                     <td>${i + 1}</td>
                     <td><span class="material-badge">${r.material}</span></td>
-                    <td>${r.description}</td>
-                    <td class="location-cell">${r.location || '-'}</td>
+                    <td>${desc}</td>
+                    <td class="location-cell">${loc}</td>
                     <td>${r.sheet}</td>
                     <td>${r.page}</td>
                 </tr>
-            `).join('');
+            `}).join('');
         }
 
         function downloadResults() {
