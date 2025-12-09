@@ -334,6 +334,10 @@
             padding: 40px;
         }
 
+        .modal-overlay.active {
+            display: flex;
+        }
+
         .modal-content {
             background: var(--bg-card);
             border: 1px solid var(--border);
@@ -341,6 +345,25 @@
             padding: 40px;
             text-align: center;
             min-width: 350px;
+            max-width: 90%;
+            /* Prevent overflow on mobile */
+        }
+
+        @media (max-width: 768px) {
+            .upload-panel {
+                padding: 20px;
+            }
+
+            .upload-card {
+                padding: 24px;
+                max-width: 100%;
+            }
+
+            .modal-content {
+                padding: 24px;
+                min-width: auto;
+                width: 100%;
+            }
         }
 
         .loader {
