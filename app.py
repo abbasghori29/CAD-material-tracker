@@ -701,6 +701,17 @@ async def process_pdf_with_job(job: JobState):
     job.status = JobStatus.RUNNING
     print(f"[JOB-{job.job_id}] Starting PDF processing: {job.pdf_path}")
     results = []
+    
+    # Reload tags from file to pick up any changes made via tag management
+    global TAG_DESCRIPTIONS
+    if os.path.exists(MATERIAL_DESCRIPTIONS_FILE):
+        try:
+            with open(MATERIAL_DESCRIPTIONS_FILE, "r", encoding="utf-8") as f:
+                TAG_DESCRIPTIONS = json.load(f)
+            print(f"[JOB-{job.job_id}] Loaded {len(TAG_DESCRIPTIONS)} tags from {MATERIAL_DESCRIPTIONS_FILE}")
+        except Exception as e:
+            print(f"[JOB-{job.job_id}] Warning: Failed to reload tags: {e}")
+    
     target_tags = list(TAG_DESCRIPTIONS.keys())
     
     await job.broadcast({"type": "start", "message": "Starting extraction..."})

@@ -220,7 +220,7 @@ Before processing PDFs, you can manage which tags the system detects:
 5. **Remove Tags**: Click the "Delete" button next to any tag to remove it
 6. **Download Tags**: Click "Download Template" to export all current tags as CSV
 
-> **Note**: After adding or removing tags, restart the server for changes to take effect in the detection system.
+> **Note**: Tags are automatically reloaded before each PDF processing job, so changes take effect immediately.
 
 ### Processing PDFs
 
