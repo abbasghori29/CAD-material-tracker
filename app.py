@@ -1476,26 +1476,69 @@ async def cleanup_endpoint():
         return {"success": False, "error": str(e)}
 
 
-# Scheduled cleanup task - runs daily at 9:13 PM
+# Scheduled cleanup task - runs daily at 9:17 PM
 async def scheduled_cleanup_uploads():
-    """Clean up uploads folder daily at 9:13 PM"""
+    """Clean up uploads, static/images, and results folders daily at 9:17 PM"""
+    total_deleted = 0
+    
+    # Clean up uploads folder
     uploads_path = Path(UPLOAD_FOLDER)
     if uploads_path.exists():
         try:
-            # Delete all files in uploads folder
             deleted_count = 0
             for file_path in uploads_path.iterdir():
                 if file_path.is_file():
                     try:
                         file_path.unlink()
                         deleted_count += 1
-                        print(f"[SCHEDULED-CLEANUP] Deleted: {file_path.name}")
+                        print(f"[SCHEDULED-CLEANUP] Deleted from uploads: {file_path.name}")
                     except Exception as e:
                         print(f"[SCHEDULED-CLEANUP] Error deleting {file_path.name}: {e}")
             
+            total_deleted += deleted_count
             print(f"[SCHEDULED-CLEANUP] Completed cleanup of {UPLOAD_FOLDER} folder - {deleted_count} files deleted")
         except Exception as e:
-            print(f"[SCHEDULED-CLEANUP] Error during cleanup: {e}")
+            print(f"[SCHEDULED-CLEANUP] Error during uploads cleanup: {e}")
+    
+    # Clean up static/images folder
+    images_path = Path(IMAGES_FOLDER)
+    if images_path.exists():
+        try:
+            deleted_count = 0
+            for file_path in images_path.iterdir():
+                if file_path.is_file():
+                    try:
+                        file_path.unlink()
+                        deleted_count += 1
+                        print(f"[SCHEDULED-CLEANUP] Deleted from static/images: {file_path.name}")
+                    except Exception as e:
+                        print(f"[SCHEDULED-CLEANUP] Error deleting {file_path.name}: {e}")
+            
+            total_deleted += deleted_count
+            print(f"[SCHEDULED-CLEANUP] Completed cleanup of {IMAGES_FOLDER} folder - {deleted_count} files deleted")
+        except Exception as e:
+            print(f"[SCHEDULED-CLEANUP] Error during static/images cleanup: {e}")
+    
+    # Clean up results folder
+    results_path = Path(RESULTS_FOLDER)
+    if results_path.exists():
+        try:
+            deleted_count = 0
+            for file_path in results_path.iterdir():
+                if file_path.is_file():
+                    try:
+                        file_path.unlink()
+                        deleted_count += 1
+                        print(f"[SCHEDULED-CLEANUP] Deleted from results: {file_path.name}")
+                    except Exception as e:
+                        print(f"[SCHEDULED-CLEANUP] Error deleting {file_path.name}: {e}")
+            
+            total_deleted += deleted_count
+            print(f"[SCHEDULED-CLEANUP] Completed cleanup of {RESULTS_FOLDER} folder - {deleted_count} files deleted")
+        except Exception as e:
+            print(f"[SCHEDULED-CLEANUP] Error during results cleanup: {e}")
+    
+    print(f"[SCHEDULED-CLEANUP] Total files deleted: {total_deleted}")
 
 def start_scheduled_cleanup():
     """Start the scheduled cleanup task"""
@@ -1504,16 +1547,16 @@ def start_scheduled_cleanup():
         from apscheduler.triggers.cron import CronTrigger
         
         scheduler = AsyncIOScheduler()
-        # Schedule cleanup to run daily at 9:13 PM
+        # Schedule cleanup to run daily at 9:17 PM
         scheduler.add_job(
             scheduled_cleanup_uploads,
-            trigger=CronTrigger(hour=21, minute=15),  # 9:13 PM
+            trigger=CronTrigger(hour=21, minute=17),  # 9:17 PM
             id='daily_cleanup_uploads',
-            name='Daily cleanup of uploads folder',
+            name='Daily cleanup of uploads, static/images, and results folders',
             replace_existing=True
         )
         scheduler.start()
-        print("[SCHEDULER] Scheduled cleanup task started - will run daily at 9:13 PM")
+        print("[SCHEDULER] Scheduled cleanup task started - will run daily at 9:17 PM (cleans uploads, static/images, and results)")
     except ImportError:
         print("[SCHEDULER] APScheduler not installed. Install with: pip install apscheduler")
         # Fallback: use asyncio-based simple scheduler
@@ -1525,8 +1568,8 @@ async def simple_scheduled_cleanup():
     
     while True:
         now = datetime.now()
-        # Calculate next 9:13 PM
-        target_time = now.replace(hour=21, minute=14, second=0, microsecond=0)
+        # Calculate next 9:17 PM
+        target_time = now.replace(hour=21, minute=17, second=0, microsecond=0)
         if target_time <= now:
             target_time += timedelta(days=1)  # Next day
         
