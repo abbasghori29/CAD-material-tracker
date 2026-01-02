@@ -290,7 +290,7 @@ This project includes a fully automated CI/CD pipeline that deploys to AWS EC2 o
 
 | Secret | Description | Example |
 |--------|-------------|---------|
-| `EC2_HOST` | EC2 public IP address | `13.61.181.68` |
+| `EC2_HOST` | EC2 public IP address | `13.216.238.153` |
 | `EC2_SSH_KEY` | Private SSH key (PEM format) | `-----BEGIN RSA PRIVATE KEY-----...` |
 | `ROBOFLOW_API_KEY` | Your Roboflow API key | `abc123...` |
 | `ROBOFLOW_MODEL_ID` | Roboflow model ID | `cad-drawing-iy9tc/11` |

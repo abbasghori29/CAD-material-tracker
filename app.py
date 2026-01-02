@@ -170,7 +170,7 @@ async def schedule_job_cancellation(job_id: str, delay: int = 60):
         print(f"[JOB-{job_id}] ⏰ No reconnection after {delay}s - cancelling job")
         job.status = JobStatus.FAILED
         job.error = "Cancelled - no active clients for 60 seconds"
-        cleanup_job_images(job_id)  # Clean up saved images
+        cleanup_job_resources(job_id)  # Clean up saved images and PDF
         cleanup_job(job_id)
     elif job_id in CANCELLATION_TASKS:
         # Job was reconnected - remove cancellation task
@@ -222,7 +222,7 @@ if OPENAI_AVAILABLE:
             timeout=60,
             max_retries=2
         )
-        print(f"OpenAI Vision enabled with gpt-4o model")
+        # OpenAI Vision enabled with gpt-4o model
     except Exception as e:
         print(f"WARNING: Failed to initialize OpenAI: {e}")
         OPENAI_AVAILABLE = False
@@ -253,7 +253,7 @@ Image.MAX_IMAGE_PIXELS = 500_000_000
 # Allow case-insensitive matching in regex, and handle potential spacing issues
 TAG_PATTERN = re.compile(r'(?i)[A-Z]{1,3}\s*[-_]?\s*[0-9]{1,3}')
 SHEET_PATTERN = re.compile(r'\b([A-Z]\d{3})\b')
-print(f"Tag Pattern: {TAG_PATTERN.pattern}")
+# Tag Pattern: (?i)[A-Z]{1,3}\s*[-_]?\s*[0-9]{1,3}
 
 # Roboflow setup
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "")
@@ -279,12 +279,10 @@ try:
     import easyocr
     # Initialize reader once (using CPU for reliability unless configured otherwise)
     # This might take a moment to load model on startup
-    print("Initializing EasyOCR...")
     READER = easyocr.Reader(['en'], gpu=False) 
-    print("EasyOCR initialized successfully")
 except ImportError:
     READER = None
-    print("WARNING: easyocr not installed")
+    # WARNING: easyocr not installed - OCR will fallback to Tesseract if available
 
 # Tesseract - Deprecated/Fallback
 try:
@@ -330,6 +328,53 @@ def cleanup_job_images(job_id: str):
             os.remove(filepath)
         except:
             pass
+
+def cleanup_job_pdf(job_id: str, max_retries: int = 5, retry_delay: float = 2.0):
+    """Delete the uploaded PDF file for a job with retry logic"""
+    job = get_job(job_id)
+    if job and job.pdf_path:
+        pdf_path = job.pdf_path
+        if not os.path.exists(pdf_path):
+            return  # File already deleted
+        
+        # Retry deletion if file is in use
+        for attempt in range(max_retries):
+            try:
+                # Try to delete the file
+                os.remove(pdf_path)
+                print(f"[JOB-{job_id}] Deleted PDF: {pdf_path}")
+                return  # Success
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    print(f"[JOB-{job_id}] PDF in use, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})...")
+                    import time
+                    time.sleep(retry_delay)
+                else:
+                    print(f"[JOB-{job_id}] Error deleting PDF {pdf_path} after {max_retries} attempts: {e}")
+                    # Schedule deletion for later
+                    schedule_delayed_pdf_deletion(pdf_path)
+            except Exception as e:
+                print(f"[JOB-{job_id}] Error deleting PDF {pdf_path}: {e}")
+                break
+
+def schedule_delayed_pdf_deletion(pdf_path: str, delay: int = 300):
+    """Schedule PDF deletion after a delay (for files still in use)"""
+    async def delayed_delete():
+        await asyncio.sleep(delay)
+        try:
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+                print(f"[CLEANUP] Deleted PDF after delay: {pdf_path}")
+        except Exception as e:
+            print(f"[CLEANUP] Error deleting PDF {pdf_path} after delay: {e}")
+    
+    # Schedule the delayed deletion
+    asyncio.create_task(delayed_delete())
+
+def cleanup_job_resources(job_id: str):
+    """Delete all resources for a job (images + PDF)"""
+    cleanup_job_images(job_id)
+    cleanup_job_pdf(job_id)
 
 
 async def broadcast(message: dict):
@@ -1036,9 +1081,12 @@ async def process_pdf_with_job(job: JobState):
             "message": "Auto-cleanup: Temporary files deleted (CSV results kept)"
         })
     
-    # Cleanup job and images after 5 minutes
+    # Cleanup job resources (images + PDF) after 5 minutes
+    # Add extra delay to ensure PDF file handles are fully released
     await asyncio.sleep(300)
-    cleanup_job_images(job.job_id)  # Clean up saved images
+    # Additional delay to ensure PDF is fully closed
+    await asyncio.sleep(5)
+    cleanup_job_resources(job.job_id)  # Clean up saved images and PDF
     cleanup_job(job.job_id)
 
 
@@ -1063,71 +1111,41 @@ async def home(request: Request):
 async def upload_tags(file: UploadFile = File(...)):
     """Upload CSV or XLSX file with tag list"""
     try:
-        # Check file extension
+        # Check file extension - support CSV, XLSX, and XLS
         filename = file.filename.lower()
-        if not (filename.endswith('.csv') or filename.endswith('.xlsx')):
+        if not (filename.endswith('.csv') or filename.endswith('.xlsx') or filename.endswith('.xls')):
             return JSONResponse(
                 status_code=400,
-                content={"success": False, "error": "File must be CSV or XLSX format"}
+                content={"success": False, "error": "File must be CSV, XLSX, or XLS format"}
             )
         
-        tags_dict = {}
-        
-        if filename.endswith('.csv'):
-            # Parse CSV
-            content = await file.read()
-            decoded = content.decode('utf-8')
-            csv_reader = csv.DictReader(decoded.splitlines())
-            
-            for row in csv_reader:
-                tag = row.get('tag', '').strip().upper()
-                description = row.get('description', '').strip()
-                
-                if tag and description:
-                    tags_dict[tag] = description
-        
-        elif filename.endswith('.xlsx'):
-            # Parse XLSX
-            try:
-                import openpyxl
-                from openpyxl import load_workbook
-            except ImportError:
-                return JSONResponse(
-                    status_code=500,
-                    content={"success": False, "error": "XLSX support not installed. Please use CSV format."}
-                )
-            
-            content = await file.read()
-            wb = load_workbook(BytesIO(content))
-            ws = wb.active
-            
-            # Assuming first row is header
-            headers = [cell.value for cell in ws[1]]
-            tag_col = headers.index('tag') if 'tag' in headers else 0
         # Use pandas for robust CSV/XLSX reading
         import pandas as pd
         from io import BytesIO
 
         try:
-            # Debug: Check file size and content
-            await file.seek(0)
+            # Read file content once into memory
             content = await file.read()
             file_size = len(content)
             print(f"Received file: {file.filename}, Size: {file_size} bytes")
-            if file_size < 10:
-                print(f"WARNING: Tiny file content: {content}")
             
-            # Reset cursor for pandas
-            file.file.seek(0)
+            if file_size < 10:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "error": "File is too small or empty"}
+                )
 
-            if file.filename.endswith('.csv'):
+            # Use BytesIO to create a file-like object for pandas
+            file_buffer = BytesIO(content)
+
+            if filename.endswith('.csv'):
                 try:
                     # Try reading with python engine to auto-detect separator
-                    df = pd.read_csv(file.file, engine='python', sep=None, on_bad_lines='skip')
+                    df = pd.read_csv(file_buffer, engine='python', sep=None, on_bad_lines='skip')
                 except Exception as e:
                     print(f"CSV read error: {e}, trying default")
-                    file.file.seek(0)
-                    df = pd.read_csv(file.file)
+                    file_buffer.seek(0)
+                    df = pd.read_csv(file_buffer)
                 
                 # If columns don't look like Tag/Description, assume headerless if 2 cols
                 # Check for various casings
@@ -1136,8 +1154,8 @@ async def upload_tags(file: UploadFile = File(...)):
                 if 'TAG' not in cols_upper:
                      if len(df.columns) >= 2:
                          # Assume headerless
-                         file.file.seek(0)
-                         df = pd.read_csv(file.file, header=None, names=['Tag', 'Description'])
+                         file_buffer.seek(0)
+                         df = pd.read_csv(file_buffer, header=None, names=['Tag', 'Description'])
                      else:
                          # Try to force rename first column
                          df.rename(columns={df.columns[0]: 'Tag'}, inplace=True)
@@ -1145,8 +1163,53 @@ async def upload_tags(file: UploadFile = File(...)):
                     # Normalize headers
                     df.columns = [str(c).strip().title() for c in df.columns]
                     
-            else: # .xlsx
-                df = pd.read_excel(BytesIO(await file.read()))
+            else: # .xlsx or .xls
+                try:
+                    # Try to read Excel file with openpyxl engine (for .xlsx)
+                    if filename.endswith('.xlsx'):
+                        df = pd.read_excel(file_buffer, engine='openpyxl')
+                    else:
+                        # For .xls files, try openpyxl first, then fallback
+                        try:
+                            df = pd.read_excel(file_buffer, engine='openpyxl')
+                        except:
+                            # Try without specifying engine (pandas will auto-detect)
+                            file_buffer.seek(0)
+                            df = pd.read_excel(file_buffer)
+                except ImportError:
+                    return JSONResponse(
+                        status_code=500,
+                        content={"success": False, "error": "Excel support not installed. Please install openpyxl: pip install openpyxl"}
+                    )
+                except Exception as e:
+                    # Fallback: try reading without engine specification
+                    try:
+                        file_buffer.seek(0)
+                        df = pd.read_excel(file_buffer)
+                    except Exception as e2:
+                        raise Exception(f"Failed to read Excel file: {str(e2)}. Please ensure the file is a valid Excel format (XLSX or XLS).")
+                
+                # Normalize column names (same logic as CSV)
+                cols_upper = [str(c).upper() for c in df.columns]
+                
+                if 'TAG' not in cols_upper:
+                    if len(df.columns) >= 2:
+                        # Assume headerless - read again without header
+                        file_buffer.seek(0)
+                        try:
+                            if filename.endswith('.xlsx'):
+                                df = pd.read_excel(file_buffer, engine='openpyxl', header=None, names=['Tag', 'Description'])
+                            else:
+                                df = pd.read_excel(file_buffer, header=None, names=['Tag', 'Description'])
+                        except:
+                            file_buffer.seek(0)
+                            df = pd.read_excel(file_buffer, header=None, names=['Tag', 'Description'])
+                    else:
+                        # Try to force rename first column
+                        df.rename(columns={df.columns[0]: 'Tag'}, inplace=True)
+                else:
+                    # Normalize headers (same as CSV)
+                    df.columns = [str(c).strip().title() for c in df.columns]
                 
             # Clean data
             df['Tag'] = df['Tag'].astype(str).str.strip().str.upper() # Ensure uppercase for tags
@@ -1169,12 +1232,18 @@ async def upload_tags(file: UploadFile = File(...)):
                 "count": len(TAG_DESCRIPTIONS)
             }
         except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
+            print(f"Error parsing file: {error_trace}")
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "error": f"Error parsing file content: {str(e)}. Please ensure it's a valid CSV/XLSX with 'Tag' and 'Description' columns."}
             )
     
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Error processing file: {error_trace}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": f"Error processing file: {str(e)}"}
@@ -1407,6 +1476,74 @@ async def cleanup_endpoint():
         return {"success": False, "error": str(e)}
 
 
+# Scheduled cleanup task - runs daily at 9:13 PM
+async def scheduled_cleanup_uploads():
+    """Clean up uploads folder daily at 9:13 PM"""
+    uploads_path = Path(UPLOAD_FOLDER)
+    if uploads_path.exists():
+        try:
+            # Delete all files in uploads folder
+            deleted_count = 0
+            for file_path in uploads_path.iterdir():
+                if file_path.is_file():
+                    try:
+                        file_path.unlink()
+                        deleted_count += 1
+                        print(f"[SCHEDULED-CLEANUP] Deleted: {file_path.name}")
+                    except Exception as e:
+                        print(f"[SCHEDULED-CLEANUP] Error deleting {file_path.name}: {e}")
+            
+            print(f"[SCHEDULED-CLEANUP] Completed cleanup of {UPLOAD_FOLDER} folder - {deleted_count} files deleted")
+        except Exception as e:
+            print(f"[SCHEDULED-CLEANUP] Error during cleanup: {e}")
+
+def start_scheduled_cleanup():
+    """Start the scheduled cleanup task"""
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        
+        scheduler = AsyncIOScheduler()
+        # Schedule cleanup to run daily at 9:13 PM
+        scheduler.add_job(
+            scheduled_cleanup_uploads,
+            trigger=CronTrigger(hour=21, minute=15),  # 9:13 PM
+            id='daily_cleanup_uploads',
+            name='Daily cleanup of uploads folder',
+            replace_existing=True
+        )
+        scheduler.start()
+        print("[SCHEDULER] Scheduled cleanup task started - will run daily at 9:13 PM")
+    except ImportError:
+        print("[SCHEDULER] APScheduler not installed. Install with: pip install apscheduler")
+        # Fallback: use asyncio-based simple scheduler
+        asyncio.create_task(simple_scheduled_cleanup())
+
+async def simple_scheduled_cleanup():
+    """Simple asyncio-based scheduler (fallback if APScheduler not available)"""
+    from datetime import datetime, timedelta
+    
+    while True:
+        now = datetime.now()
+        # Calculate next 9:13 PM
+        target_time = now.replace(hour=21, minute=14, second=0, microsecond=0)
+        if target_time <= now:
+            target_time += timedelta(days=1)  # Next day
+        
+        wait_seconds = (target_time - now).total_seconds()
+        print(f"[SCHEDULER] Next cleanup scheduled for {target_time.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds/3600:.1f} hours)")
+        
+        await asyncio.sleep(wait_seconds)
+        await scheduled_cleanup_uploads()
+
+# Start scheduler on app startup
+@app.on_event("startup")
+async def startup_event():
+    """Start scheduled tasks on application startup"""
+    start_scheduled_cleanup()
+
 if __name__ == "__main__":
     import uvicorn
+    # Start scheduler before running server
+    start_scheduled_cleanup()
     uvicorn.run(app, host="0.0.0.0", port=8000)

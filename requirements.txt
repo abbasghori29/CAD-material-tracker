@@ -83,3 +83,4 @@ zstandard==0.25.0
 pandas
 openpyxl
 easyocr
+apscheduler
