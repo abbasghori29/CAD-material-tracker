@@ -183,30 +183,26 @@ from pydantic import BaseModel, Field
 
 class DrawingLocationInfo(BaseModel):
     """Extracted location information from a CAD drawing."""
+    drawing_id: str = Field(
+        description="The alphanumeric code/identifier for the drawing, usually found to the left of the title or in a circle. Examples: '1/A101', '5', 'A-2'. Return empty string if not found."
+    )
     location_description: str = Field(
         description="The location identifier/description found in the drawing title block or header. Examples: 'E1 1/8 RCP - LEVEL 3 PART B', 'C3 KITCHEN E1 ELEVATION 2', 'B1 SECTION AT EAST OF GARAGE - NS'. Return empty string if not found."
     )
 
 # Shared prompt for location extraction
-LOCATION_EXTRACTION_PROMPT = """Extract the drawing title/location from this CAD drawing image.
+LOCATION_EXTRACTION_PROMPT = """Extract the drawing identifier and title/location from this CAD drawing image.
 
 Look carefully at these areas:
-- Title block (usually bottom-right corner or top of page)
-- Drawing header/label (large text near top)
-- Sheet information area
-- Any prominent text labels
+- The circular bubble or rectangular box usually to the left of or above the main title (contains drawing ID).
+- Title block (usually bottom-right corner or top of page).
+- Drawing header/label (large text near top).
 
-Extract the main title or location identifier. Examples:
-- "E1 ELEVATION WEST"
-- "KITCHEN ELEVATION" 
-- "LEVEL 3 PLAN"
-- "A101 FLOOR PLAN"
-- "SECTION AT GARAGE"
-- "DOOR SCHEDULE"
-- "TYPICAL MOUNTING HEIGHTS"
+Extraction Rules:
+1. Drawing ID: Extract the alphanumeric code (e.g., '1', '1-A101', 'A', 1 IN210, 2 ID202) that identifies this specific drawing on the sheet. It is often closest to the left of the location text.
+2. Location: Extract the main title or location identifier (e.g., 'LEVEL 3 PLAN', 'SECTION AT GARAGE').
 
-Return the text you see. If multiple text elements exist, combine them into a meaningful title.
-Only return empty string if there is truly NO title or location text visible in the image."""
+Return both fields. Use empty string if a field is not found."""
 
 # OpenAI setup for vision
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -562,10 +558,10 @@ def ocr_image(img: Image.Image) -> str:
         return ""
 
 
-def extract_location_description(img: Image.Image) -> str:
+def extract_location_description(img: Image.Image) -> tuple:
     """Extract location description from CAD drawing using OpenAI Vision (single image)."""
     if not OPENAI_AVAILABLE or VISION_LLM is None:
-        return ""
+        return "", ""
     
     try:
         # Convert image to base64
@@ -585,11 +581,14 @@ def extract_location_description(img: Image.Image) -> str:
         )
         
         result = structured_llm.invoke([message])
-        return result.location_description.strip() if result.location_description else ""
+        return (
+            result.drawing_id.strip() if result.drawing_id else "",
+            result.location_description.strip() if result.location_description else ""
+        )
         
     except Exception as e:
         print(f"[OpenAI] Location extraction error: {type(e).__name__}: {e}")
-        return ""  # Return empty on any error - don't block processing
+        return "", ""  # Return empty on any error - don't block processing
 
 
 class BatchLocationInfo(BaseModel):
@@ -767,12 +766,13 @@ async def process_pdf_with_job(job: JobState):
                     matched_tags.append(t)
                     # Use a special debug flag in the result to show in UI log
                     drawing_results.append({
-                        "material": t,
-                        "description": TAG_DESCRIPTIONS.get(t, "Unknown"),
+                        "material_type": TAG_DESCRIPTIONS.get(t, "Unknown"),
+                        "tag": t,
                         "sheet": sheet,
                         "page": page_num,
-                        "confidence": f"{conf:.0%}",
+                        "description": "", # Will be drawing_id from OpenAI
                         "location": location_desc,
+                        "confidence": f"{conf:.0%}",
                         "_debug_match": True 
                     })
                     match_found = True
@@ -925,17 +925,20 @@ async def process_pdf_with_job(job: JobState):
                             try:
                                 await job.broadcast({"type": "log", "level": "info", "message": f"Tags found! Extracting location..."})
                                 print(f"[JOB-{job.job_id}] Starting OpenAI call for drawing {i+1}")
-                                location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
-                                print(f"[JOB-{job.job_id}] OpenAI call complete: {location_desc[:50] if location_desc else 'empty'}")
+                                drawing_id, location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
+                                print(f"[JOB-{job.job_id}] OpenAI call complete: ID={drawing_id}, LOC={location_desc[:30]}")
                             except Exception as e:
                                 print(f"[JOB-{job.job_id}] OpenAI ERROR: {type(e).__name__}: {e}")
+                                drawing_id, location_desc = "", ""
                                 await job.broadcast({"type": "log", "level": "warning", "message": f"Location extraction failed"})
                         elif not valid_tags_exist:
+                             drawing_id, location_desc = "", ""
                              await job.broadcast({"type": "log", "level": "info", "message": f"No tags, skipping location extraction"})
 
                         # Step 4: Update results with location and drawing index
                         for r in drawing_results:
                             r['location'] = location_desc
+                            r['description'] = drawing_id # Use alphanumeric code as description
                             r['drawing_index'] = i + 1
                             
                         # Process results including debug logs
@@ -956,7 +959,7 @@ async def process_pdf_with_job(job: JobState):
                                 await job.broadcast({
                                     "type": "log", 
                                     "level": "success", 
-                                    "message": f"✅ MATCHED: {result['material']} in drawing {i+1} (Page {page_num})"
+                                    "message": f"✅ MATCHED: {result['tag']} in drawing {i+1} (Page {page_num})"
                                 })
                                 
                                 # Send structured event for UI update
@@ -964,7 +967,7 @@ async def process_pdf_with_job(job: JobState):
                                     "type": "tag_match",
                                     "page": page_num,
                                     "drawing_index": i + 1,
-                                    "tag": result['material'],
+                                    "tag": result['tag'],
                                     "description": result.get('description', '')
                                 })
                             else:
@@ -1029,14 +1032,13 @@ async def process_pdf_with_job(job: JobState):
                 if r.get("_debug_ignored") or r.get("_debug_match"):
                     continue
                 
-                # 2. Strict validation - must have material and sheet
-                if not r.get("material") or not r.get("sheet"):
+                # 2. Strict validation - must have tag and sheet
+                if not r.get("tag") or not r.get("sheet"):
                     continue
-                    
+                
                 # 3. Final Deduplication
-                # Create a signature: material + sheet + page + drawing_index
-                # We use drawing_index to ensure we don't merge different physical locations
-                sig = f"{r['material']}-{r['sheet']}-{r['page']}-{r.get('drawing_index', '0')}"
+                # Create a signature: tag + sheet + page + drawing_index
+                sig = f"{r['tag']}-{r['sheet']}-{r['page']}-{r.get('drawing_index', '0')}"
                 if sig in seen_in_final:
                     continue
                 seen_in_final.add(sig)
@@ -1046,9 +1048,18 @@ async def process_pdf_with_job(job: JobState):
             csv_path = os.path.join(RESULTS_FOLDER, "results.csv")
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Count", "Material", "Description", "Sheet", "Page", "Confidence", "Location"])
-                for i, r in enumerate(final_results, 1):
-                    writer.writerow([i, r["material"], r["description"], r["sheet"], r["page"], r["confidence"], r.get("location", "")])
+                # New order: Material Type, Tag, Sheet, Page, Description, Location, Confidence
+                writer.writerow(["Material Type", "Tag", "Sheet", "Page", "Description", "Location", "Confidence"])
+                for r in final_results:
+                    writer.writerow([
+                        r.get("material_type", "Unknown"),
+                        r.get("tag", ""),
+                        r.get("sheet", ""),
+                        r.get("page", ""),
+                        r.get("description", ""),
+                        r.get("location", ""),
+                        r.get("confidence", "")
+                    ])
             
             # Job completed successfully
             job.status = JobStatus.COMPLETED
@@ -1151,14 +1162,14 @@ async def upload_tags(file: UploadFile = File(...)):
                 # Check for various casings
                 cols_upper = [str(c).upper() for c in df.columns]
                 
-                if 'TAG' not in cols_upper:
+                if 'TAGS' not in cols_upper:
                      if len(df.columns) >= 2:
                          # Assume headerless
                          file_buffer.seek(0)
-                         df = pd.read_csv(file_buffer, header=None, names=['Tag', 'Description'])
+                         df = pd.read_csv(file_buffer, header=None, names=['Tags', 'Material Type'])
                      else:
                          # Try to force rename first column
-                         df.rename(columns={df.columns[0]: 'Tag'}, inplace=True)
+                         df.rename(columns={df.columns[0]: 'Tags'}, inplace=True)
                 else:
                     # Normalize headers
                     df.columns = [str(c).strip().title() for c in df.columns]
@@ -1192,34 +1203,34 @@ async def upload_tags(file: UploadFile = File(...)):
                 # Normalize column names (same logic as CSV)
                 cols_upper = [str(c).upper() for c in df.columns]
                 
-                if 'TAG' not in cols_upper:
+                if 'TAGS' not in cols_upper:
                     if len(df.columns) >= 2:
                         # Assume headerless - read again without header
                         file_buffer.seek(0)
                         try:
                             if filename.endswith('.xlsx'):
-                                df = pd.read_excel(file_buffer, engine='openpyxl', header=None, names=['Tag', 'Description'])
+                                df = pd.read_excel(file_buffer, engine='openpyxl', header=None, names=['Tags', 'Material Type'])
                             else:
-                                df = pd.read_excel(file_buffer, header=None, names=['Tag', 'Description'])
+                                df = pd.read_excel(file_buffer, header=None, names=['Tags', 'Material Type'])
                         except:
                             file_buffer.seek(0)
-                            df = pd.read_excel(file_buffer, header=None, names=['Tag', 'Description'])
+                            df = pd.read_excel(file_buffer, header=None, names=['Tags', 'Material Type'])
                     else:
                         # Try to force rename first column
-                        df.rename(columns={df.columns[0]: 'Tag'}, inplace=True)
+                        df.rename(columns={df.columns[0]: 'Tags'}, inplace=True)
                 else:
                     # Normalize headers (same as CSV)
                     df.columns = [str(c).strip().title() for c in df.columns]
                 
             # Clean data
-            df['Tag'] = df['Tag'].astype(str).str.strip().str.upper() # Ensure uppercase for tags
-            if 'Description' in df.columns:
-                df['Description'] = df['Description'].fillna('Unknown').astype(str).str.strip()
+            df['Tags'] = df['Tags'].astype(str).str.strip().str.upper() # Ensure uppercase for tags
+            if 'Material Type' in df.columns:
+                df['Material Type'] = df['Material Type'].fillna('Unknown').astype(str).str.strip()
             else:
-                df['Description'] = 'Unknown'
+                df['Material Type'] = 'Unknown'
                 
             global TAG_DESCRIPTIONS
-            TAG_DESCRIPTIONS = pd.Series(df.Description.values, index=df.Tag).to_dict()
+            TAG_DESCRIPTIONS = pd.Series(df['Material Type'].values, index=df['Tags']).to_dict()
             
             # Remove any "nan" string keys or empty keys
             TAG_DESCRIPTIONS = {k: v for k, v in TAG_DESCRIPTIONS.items() if k and k.lower() != 'nan'}
