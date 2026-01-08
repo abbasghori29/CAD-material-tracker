@@ -72,7 +72,7 @@ class JobState:
         return False
     
     async def broadcast(self, message: dict):
-        """Broadcast message to all subscribers (no storage - we don't replay)"""
+        """Broadcast message to all subscribers - optimized to stop logging after completion"""
         if len(self.subscribers) == 0:
             # Silently skip if no subscribers (job might be cancelled)
             return
@@ -81,22 +81,26 @@ class JobState:
         dead_sockets = []
         msg_type = message.get('type', 'unknown')
         
-        # Only log non-image messages to reduce noise
-        if msg_type not in ['full_page', 'drawing', 'heartbeat']:
+        # Only log if job is still running (stops logging after completion)
+        job_running = self.status == JobStatus.RUNNING
+        
+        # Only log non-image messages AND only if job is running
+        if job_running and msg_type not in ['full_page', 'drawing', 'heartbeat']:
             print(f"[JOB-{self.job_id}] Broadcasting '{msg_type}' to {len(self.subscribers)} subscriber(s)")
         
         for ws in self.subscribers[:]:  # Copy list to avoid modification during iteration
             try:
                 await ws.send_json(message)
-                # Only log success for important messages
-                if msg_type not in ['full_page', 'drawing', 'heartbeat']:
+                # Only log success for important messages AND only if job is running
+                if job_running and msg_type not in ['full_page', 'drawing', 'heartbeat']:
                     print(f"[JOB-{self.job_id}] ✅ Sent '{msg_type}' successfully")
             except Exception as e:
-                # Disconnect is expected if client closed - don't spam logs
-                if 'WebSocketDisconnect' in str(type(e).__name__) or 'ConnectionClosed' in str(type(e).__name__):
-                    print(f"[JOB-{self.job_id}] Client disconnected during '{msg_type}' send")
-                else:
-                    print(f"[JOB-{self.job_id}] ❌ Failed to send '{msg_type}': {type(e).__name__}: {e}")
+                # Only log errors if job is running (reduces I/O after completion)
+                if job_running:
+                    if 'WebSocketDisconnect' in str(type(e).__name__) or 'ConnectionClosed' in str(type(e).__name__):
+                        print(f"[JOB-{self.job_id}] Client disconnected during '{msg_type}' send")
+                    else:
+                        print(f"[JOB-{self.job_id}] ❌ Failed to send '{msg_type}': {type(e).__name__}: {e}")
                 dead_sockets.append(ws)
         
         # Remove dead sockets
@@ -276,9 +280,10 @@ try:
     # Initialize reader once (using CPU for reliability unless configured otherwise)
     # This might take a moment to load model on startup
     READER = easyocr.Reader(['en'], gpu=False) 
-except ImportError:
+except (ImportError, OSError) as e:
     READER = None
-    # WARNING: easyocr not installed - OCR will fallback to Tesseract if available
+    # WARNING: easyocr not installed or PyTorch DLL loading failed - OCR will fallback to Tesseract if available
+    print(f"EasyOCR initialization failed: {e}")
 
 # Tesseract - Deprecated/Fallback
 try:
@@ -1285,35 +1290,70 @@ async def websocket_endpoint(websocket: WebSocket):
     heartbeat_task = None
     
     async def heartbeat():
-        """Send heartbeat every 1 second - bulletproof connection"""
+        """Send heartbeat - stops completely after job completion to save resources"""
         count = 0
         errors = 0
-        dummy_data = "X" * 1000  # 1KB keepalive payload
+        heartbeat_interval = 1  # Start with 1 second during active job
+        dummy_data = "X" * 100  # Reduced from 1KB to 100 bytes for less I/O
+        completion_wait_count = 0  # Track time since completion
+        max_wait_after_completion = 60  # Stop heartbeat 60 seconds after completion
         
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(heartbeat_interval)
             count += 1
-            try:
-                await websocket.send_json({
-                    "type": "heartbeat", 
-                    "n": count,
-                    "keep_alive": dummy_data
-                })
+            
+            # Check job status (lightweight check)
+            job_active = False
+            job_completed = False
+            if current_job:
+                job_status = current_job.status
+                job_active = job_status == JobStatus.RUNNING
+                job_completed = job_status in [JobStatus.COMPLETED, JobStatus.FAILED]
                 
-                if count % 10 == 0:
+                if job_completed:
+                    completion_wait_count += 1
+                    heartbeat_interval = 5  # 5 seconds after completion (just to allow result download)
+                    
+                    # Stop heartbeat completely after waiting period (zero resource usage)
+                    if completion_wait_count >= max_wait_after_completion:
+                        # Job is done, client had time to download results - stop heartbeat completely
+                        break
+                else:
+                    heartbeat_interval = 1  # 1 second during active job
+                    completion_wait_count = 0  # Reset counter
+            else:
+                # No job yet - keep minimal heartbeat (1 second) for connection health
+                heartbeat_interval = 1
+                completion_wait_count = 0
+            
+            try:
+                # Send heartbeat if:
+                # 1. Job is active (running)
+                # 2. Job completed but within wait period (allows result download)
+                # 3. No job yet (keeps connection alive for new jobs)
+                if job_active or (job_completed and completion_wait_count < max_wait_after_completion) or not current_job:
+                    await websocket.send_json({
+                        "type": "heartbeat", 
+                        "n": count,
+                        "keep_alive": dummy_data
+                    })
+                
+                # ONLY log if job is actively running (every 30 seconds to reduce I/O)
+                if job_active and count % 30 == 0:
                     await websocket.send_json({
                         "type": "log",
                         "level": "info",
                         "message": f"⚡ Connection alive ({count}s)"
                     })
-                    print(f"[WS-HEARTBEAT] {count} seconds, connection alive")
+                    # Removed print statement - reduces disk I/O
                 
                 errors = 0
             except Exception as e:
                 errors += 1
-                print(f"[WS-HEARTBEAT] FAILED #{errors} at {count}s: {type(e).__name__}")
+                # Only log errors if job is active (reduces I/O)
+                if job_active:
+                    print(f"[WS-HEARTBEAT] FAILED #{errors} at {count}s: {type(e).__name__}")
                 if errors >= 3:
-                    print(f"[WS-HEARTBEAT] Stopping after {errors} failures")
                     break
     
     try:
@@ -1325,7 +1365,9 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_json()
             action = data.get("action")
-            print(f"[WS] Received: {action}")
+            # Only log if job is active (reduces I/O)
+            if current_job and current_job.status == JobStatus.RUNNING:
+                print(f"[WS] Received: {action}")
             
             if action == "ping":
                 await websocket.send_json({"type": "pong"})
