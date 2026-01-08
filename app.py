@@ -713,22 +713,26 @@ async def process_pdf_with_job(job: JobState):
     
     await job.broadcast({"type": "start", "message": "Starting extraction..."})
     
+    def clean_tag_text(t):
+        """Remove all non-alphanumeric characters for fuzzy matching."""
+        import re
+        return re.sub(r'[^A-Z0-9]', '', str(t).upper())
+    
+    # 1. Create a map of cleaned tags to original tags for inference
+    # This allows matching "MC1" to "MC-1"
+    CLEANED_MAPPING = {}
+    for t in target_tags:
+        ct = clean_tag_text(t)
+        if ct:
+            CLEANED_MAPPING[ct] = t
+    
+    CLEANED_TARGETS = list(CLEANED_MAPPING.keys())
+
     def process_ocr_and_tags(text, conf, sheet, page_num, location_desc):
         """Process OCR text to find tags (runs in thread)"""
         # Clean text for better matching (normalize spaces)
         text_clean = " ".join(text.split())
         found_tags_raw = TAG_PATTERN.findall(text_clean)
-        
-        if found_tags_raw:
-             debug_msg = f"P{page_num} Candidates: {found_tags_raw}"
-             print(f"[JOB-{job.job_id}] {debug_msg}")
-             # We can't await inside this thread, so we just print. 
-             # To show in UI, we'd need to change how this runs or queue messages.
-             # Actually, this runs in a thread executor, so we can't broadcast easily without an event loop.
-             # Let's append to a list that the main loop checks/sends, OR just trust print for now?
-             # Wait, the user said they CAN'T see terminal logs.
-             # I must capture these results and return them in drawing_results so the main loop can log them.
-             pass
         
         found_tags = []
         # Normalize found tags (remove spaces)
@@ -742,32 +746,42 @@ async def process_pdf_with_job(job: JobState):
         matched_tags = []
         drawing_results = []
         
-        # Deduplicate: Only report each unique tag ONCE per drawing
+        # Deduplicate: Only report each unique original tag ONCE per drawing
         seen_tags_in_drawing = set()
         
         # Capture OCR text sample for debugging UI
         ocr_sample = text_clean[:50] + "..." if len(text_clean) > 50 else text_clean
         
         for tag in found_tags:
-            tag_upper = tag.upper()
-            # Try variations
-            variations = [tag_upper, tag_upper.replace('O', '0'), tag_upper.replace('0', 'O')]
+            # Clean the tag found by OCR for comparison
+            # Example: OCR finds "MC1", we clean it to "MC1"
+            tag_cleaned = clean_tag_text(tag)
             
-            # Check against target_tags
+            # Try variations for O/0 swapping
+            variations = [tag_cleaned]
+            if 'O' in tag_cleaned:
+                variations.append(tag_cleaned.replace('O', '0'))
+            if '0' in tag_cleaned:
+                variations.append(tag_cleaned.replace('0', 'O'))
+            
+            # Check against CLEANED_TARGETS
             match_found = False
-            for t in variations:
-                if t in target_tags:
-                    # Deduplication check
-                    if t in seen_tags_in_drawing:
+            for v in variations:
+                if v in CLEANED_TARGETS:
+                    original_tag = CLEANED_MAPPING[v]
+                    
+                    # Deduplication check on original tag
+                    if original_tag in seen_tags_in_drawing:
                         match_found = True # Recognized, but already added
                         break
                         
-                    seen_tags_in_drawing.add(t)
-                    matched_tags.append(t)
+                    seen_tags_in_drawing.add(original_tag)
+                    matched_tags.append(original_tag)
+                    
                     # Use a special debug flag in the result to show in UI log
                     drawing_results.append({
-                        "material_type": TAG_DESCRIPTIONS.get(t, "Unknown"),
-                        "tag": t,
+                        "material_type": TAG_DESCRIPTIONS.get(original_tag, "Unknown"),
+                        "tag": original_tag,
                         "sheet": sheet,
                         "page": page_num,
                         "description": "", # Will be drawing_id from OpenAI
@@ -782,7 +796,7 @@ async def process_pdf_with_job(job: JobState):
                  # Return a "debug" result that isn't a real match but logs to UI
                  drawing_results.append({
                      "_debug_ignored": True,
-                     "tag": tag_upper,
+                     "tag": tag.upper(),
                      "variations": variations,
                      "ocr_text": ocr_sample
                  })
