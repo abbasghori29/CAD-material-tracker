@@ -48,6 +48,9 @@ results/
 .env
 .env.local
 
+# Keys/Certificates
+absolute-builders-ec2-key-pair.pem
+
 # Logs
 *.log
 
