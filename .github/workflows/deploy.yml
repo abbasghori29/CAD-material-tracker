@@ -1,7 +1,7 @@
 # CI/CD Pipeline for CAD Material Tracker
 # Fully automated: Push to main → Deployed to EC2
 # Includes all fixes for: Tesseract, OpenCV, Nginx, WebSocket, Large files
-# Required GitHub Secrets: EC2_HOST, EC2_SSH_KEY, ROBOFLOW_API_KEY, ROBOFLOW_MODEL_ID, OPENAI_API_KEY
+# Required GitHub Secrets: EC2_HOST, EC2_SSH_KEY, ROBOFLOW_API_KEY, ROBOFLOW_MODEL_ID, OPENAI_API_KEY, LLAMA_PARSE_API_KEY
 
 name: Deploy to AWS EC2
 
@@ -297,6 +297,7 @@ jobs:
             ROBOFLOW_API_KEY=${{ secrets.ROBOFLOW_API_KEY }}
             ROBOFLOW_MODEL_ID=${{ secrets.ROBOFLOW_MODEL_ID }}
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            LLAMA_PARSE_API_KEY=${{ secrets.LLAMA_PARSE_API_KEY }}
             AUTO_CLEANUP=true
             ENVFILE
             
@@ -358,6 +359,7 @@ jobs:
             echo "🔑 API Keys Configured:"
             echo "   - Roboflow: $([ -n '${{ secrets.ROBOFLOW_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
             echo "   - OpenAI: $([ -n '${{ secrets.OPENAI_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
+            echo "   - LlamaParse: $([ -n '${{ secrets.LLAMA_PARSE_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
             echo ""
             echo "📊 Service Status:"
             sudo systemctl status cad-tracker --no-pager -l || true

@@ -59,7 +59,7 @@ py -3.12 -m venv venv312
 python3.12 -m venv venv312
 
 # Activate virtual environment
-venv312\Scripts\Activate.ps1
+venv\Scripts\Activate.ps1
 ```
 
 **Mac/Linux:**

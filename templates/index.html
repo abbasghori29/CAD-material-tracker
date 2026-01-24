@@ -1953,16 +1953,20 @@
                             jobId = data.job_id;
                         }
 
-                        if (data.type === 'reconnect_summary') {
-                            jobId = data.job_id;
-                            addLog('success', `🔄 Resumed job ${data.job_id}`);
-                            addLog('info', `📊 Progress: Page ${data.current_page}/${data.total_pages} | ${data.results_count} tags found`);
+                    if (data.type === 'reconnect_summary') {
+                        jobId = data.job_id;
+                        addLog('success', `🔄 Resumed job ${data.job_id}`);
+                        addLog('info', `📊 Progress: Page ${data.current_page}/${data.total_pages} | ${data.results_count} tags found`);
 
-                            // Update stats
-                            stats.pages = data.pages_processed;
-                            stats.tags = data.results_count;
-                            updateStats();
-                        } else if (data.type === 'tag_match') {
+                        // Update stats
+                        stats.pages = data.pages_processed;
+                        stats.tags = data.results_count;
+                        updateStats();
+                        
+                        // Clear drawings container for replayed images
+                        document.getElementById('drawings-container').innerHTML = '';
+                        document.getElementById('page-info').textContent = `Page ${data.current_page} (Reconnected)`;
+                    } else if (data.type === 'tag_match') {
                             // Update the specific drawing card with the found tag
                             const drawingId = `drawing-${data.page}-${data.drawing_index}`;
                             const drawingCard = document.getElementById(drawingId);
@@ -2388,16 +2392,21 @@
                         return;
                     }
 
-                    // Handle reconnect summary (no image replay)
+                    // Handle reconnect summary - WITH image replay
                     if (data.type === 'reconnect_summary') {
                         console.log('[JOB] Reconnect summary:', data);
                         addLog('success', `⚡ Reconnected to job ${data.job_id}`);
                         addLog('info', `📊 Progress: Page ${data.current_page}/${data.total_pages} | ${data.results_count} tags found`);
+                        addLog('info', `🔄 Replaying current page images...`);
 
                         // Update stats display
                         stats.pages = data.pages_processed;
                         stats.tags = data.results_count;
                         updateStats();
+                        
+                        // Clear drawings container for replayed images
+                        document.getElementById('drawings-container').innerHTML = '';
+                        document.getElementById('page-info').textContent = `Page ${data.current_page} (Reconnected)`;
 
                         return;
                     }
@@ -2579,6 +2588,12 @@
                         if (resultsPanel) {
                             resultsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
                         }
+                        
+                        // Auto-download CSV after 1 second delay
+                        setTimeout(() => {
+                            addLog('info', '📥 Auto-downloading CSV results...');
+                            downloadResults();
+                        }, 1000);
                     }
                     break;
 

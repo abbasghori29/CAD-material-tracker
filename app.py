@@ -3,6 +3,26 @@ CAD Material Tracker - FastAPI Web Application
 Real-time UI with WebSockets for live updates
 """
 
+# ============================================
+# DISABLE WEBSOCKET PING/PONG - MUST BE FIRST
+# This prevents disconnections when browser tab is inactive
+# Browser throttles inactive tabs and can't respond to pings
+# ============================================
+try:
+    import websockets.server
+    _original_serve = websockets.server.serve
+    
+    def _serve_no_ping(*args, **kwargs):
+        """Monkey-patch to disable WebSocket ping/pong"""
+        kwargs['ping_interval'] = None  # Disable server pings
+        kwargs['ping_timeout'] = None   # Disable ping timeout
+        return _original_serve(*args, **kwargs)
+    
+    websockets.server.serve = _serve_no_ping
+    print("[WS-CONFIG] WebSocket ping/pong DISABLED - tab inactivity won't cause disconnects")
+except Exception as e:
+    print(f"[WS-CONFIG] Warning: Could not disable WebSocket pings: {e}")
+
 from fastapi import FastAPI, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +40,16 @@ from dotenv import load_dotenv
 import gc  # Garbage collection for memory cleanup
 import uuid
 from enum import Enum
+
+# Enable nested event loops - REQUIRED for LlamaParse which uses async internally
+# This must be done BEFORE any event loops are created
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+    print("[INIT] nest_asyncio applied - nested event loops enabled")
+except ImportError:
+    print("[INIT] WARNING: nest_asyncio not installed - LlamaParse may fail")
+    print("[INIT] Install with: pip install nest-asyncio")
 
 # Load environment variables
 load_dotenv()
@@ -51,6 +81,9 @@ class JobState:
         self.completed_at = None
         self.subscribers: List[WebSocket] = []  # WebSockets watching this job
         self.messages = []  # Store all messages for late joiners
+        # Track processed pages with their images for reconnection replay
+        self.processed_pages: Dict[int, dict] = {}  # page_num -> {full_page_url, drawings: [...], sheet}
+        self.current_drawing_index = 0  # Current drawing being processed
         
     def add_subscriber(self, websocket: WebSocket):
         """Add a WebSocket to watch this job"""
@@ -108,14 +141,14 @@ class JobState:
             self.remove_subscriber(ws)
     
     async def send_summary(self, websocket: WebSocket):
-        """Send job summary to reconnecting client - NO IMAGE REPLAY"""
-        print(f"[JOB-{self.job_id}] Sending summary (no replay) to new subscriber")
+        """Send job summary to reconnecting client - WITH IMAGE REPLAY"""
+        print(f"[JOB-{self.job_id}] Sending summary with image replay to new subscriber")
         
         # Count what we've done
         pages_processed = self.current_page - self.start_page
         
-        # Send summary
         try:
+            # Send reconnect summary first
             await websocket.send_json({
                 "type": "reconnect_summary",
                 "job_id": self.job_id,
@@ -124,7 +157,7 @@ class JobState:
                 "total_pages": self.total_pages,
                 "pages_processed": pages_processed,
                 "results_count": len(self.results),
-                "message": f"Caught up to page {self.current_page}/{self.end_page}"
+                "message": f"Reconnected! Replaying current page..."
             })
             
             # Send current stats
@@ -134,7 +167,41 @@ class JobState:
                 "message": f"📊 Reconnected: Page {self.current_page}/{self.end_page} | {len(self.results)} tags found so far"
             })
             
-            print(f"[JOB-{self.job_id}] Summary sent, will continue from page {self.current_page}")
+            # Replay current page images if we have them
+            if self.current_page in self.processed_pages:
+                page_data = self.processed_pages[self.current_page]
+                
+                # Send full page image
+                if page_data.get('full_page_url'):
+                    await websocket.send_json({
+                        "type": "full_page",
+                        "image_url": page_data['full_page_url'],
+                        "page": self.current_page,
+                        "sheet": page_data.get('sheet', 'N/A'),
+                        "drawing_count": len(page_data.get('drawings', []))
+                    })
+                    print(f"[JOB-{self.job_id}] Replayed full page image for page {self.current_page}")
+                
+                # Send all drawing images that have been processed
+                for drawing in page_data.get('drawings', []):
+                    await websocket.send_json({
+                        "type": "drawing",
+                        "index": drawing['index'],
+                        "total_drawings": page_data.get('total_drawings', len(page_data.get('drawings', []))),
+                        "image_url": drawing['image_url'],
+                        "confidence": drawing.get('confidence', 'N/A'),
+                        "bbox": drawing.get('bbox', [])
+                    })
+                print(f"[JOB-{self.job_id}] Replayed {len(page_data.get('drawings', []))} drawing images")
+            
+            # Send log about where we are
+            await websocket.send_json({
+                "type": "log",
+                "level": "info",
+                "message": f"▶️ Continuing from drawing {self.current_drawing_index + 1} on page {self.current_page}..."
+            })
+            
+            print(f"[JOB-{self.job_id}] Summary sent, will continue from page {self.current_page}, drawing {self.current_drawing_index + 1}")
         except Exception as e:
             print(f"[JOB-{self.job_id}] Failed to send summary: {e}")
 
@@ -165,8 +232,8 @@ def cleanup_job(job_id: str):
         del CANCELLATION_TASKS[job_id]
     print(f"[JOB-{job_id}] Cleaned up")
 
-async def schedule_job_cancellation(job_id: str, delay: int = 60):
-    """Schedule job cancellation after delay if no reconnection"""
+async def schedule_job_cancellation(job_id: str, delay: int = 600):
+    """Schedule job cancellation after delay if no reconnection (default: 10 minutes)"""
     await asyncio.sleep(delay)
     
     job = get_job(job_id)
@@ -249,11 +316,17 @@ for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER, RESULTS_FOLDER, "static", "template
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = 500_000_000
 
-# Regex for tags (e.g. WD-01, A-101, C2)
-# Allow case-insensitive matching in regex, and handle potential spacing issues
-TAG_PATTERN = re.compile(r'(?i)[A-Z]{1,3}\s*[-_]?\s*[0-9]{1,3}')
-SHEET_PATTERN = re.compile(r'\b([A-Z]\d{3})\b')
-# Tag Pattern: (?i)[A-Z]{1,3}\s*[-_]?\s*[0-9]{1,3}
+# Regex for tags - FLEXIBLE to handle any length and common CAD separators
+# Common CAD separators: hyphen (-), underscore (_), period (.), slash (/)
+# Pattern matches: LETTERS + optional separator + optional more LETTERS + separator + DIGIT-LIKE + optional suffix
+# Examples: BR-1, A_WC-12, A_PT-1A, APT-IA (1→I OCR error), WC-12
+# Requires at least one digit-like character: 0-9, I, l, O (common OCR confusions)
+TAG_PATTERN = re.compile(r'(?i)[A-Z]+[-_./]?[A-Z]*[-_./]?[0-9IlO][A-Z0-9IlO]*')
+# Sheet number detection is done in get_sheet_number() function with scoring logic
+# Common sheet prefixes: A=Architectural, E=Electrical, S=Structural, M=Mechanical, 
+# P=Plumbing, C=Civil, G=General, L=Landscape, D=Details
+# Digit-like: 0-9, I (often 1), l (often 1), O (often 0)
+# This pattern ensures at least one digit-like char exists in the tag
 
 # Roboflow setup
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "")
@@ -273,22 +346,39 @@ try:
 except ImportError:
     pass
 
-# EasyOCR setup
+# OCR Setup - Multi-engine with LlamaParse as primary (best accuracy for CAD drawings)
 import numpy as np
+
+# LlamaParse - BEST for CAD drawings (most accurate, handles complex layouts)
+LLAMA_PARSE = None
+LLAMA_PARSE_API_KEY = os.getenv("LLAMA_PARSE_API_KEY", "")
+try:
+    from llama_parse import LlamaParse
+    if LLAMA_PARSE_API_KEY:
+        LLAMA_PARSE = LlamaParse(api_key=LLAMA_PARSE_API_KEY, result_type="text")
+        print("[OCR] LlamaParse initialized - best accuracy for CAD drawings")
+    else:
+        print("[OCR] LlamaParse API key not set - set LLAMA_PARSE_API_KEY in .env")
+except ImportError:
+    print("[OCR] LlamaParse not installed - install with: pip install llama-parse")
+except Exception as e:
+    print(f"[OCR] LlamaParse initialization failed: {e}")
+
+# EasyOCR - Fallback option
+EASY_OCR_READER = None
 try:
     import easyocr
-    # Initialize reader once (using CPU for reliability unless configured otherwise)
-    # This might take a moment to load model on startup
-    READER = easyocr.Reader(['en'], gpu=False) 
+    EASY_OCR_READER = easyocr.Reader(['en'], gpu=False)
+    print("[OCR] EasyOCR initialized as fallback")
 except (ImportError, OSError) as e:
-    READER = None
-    # WARNING: easyocr not installed or PyTorch DLL loading failed - OCR will fallback to Tesseract if available
-    print(f"EasyOCR initialization failed: {e}")
+    print(f"[OCR] EasyOCR not available: {e}")
 
-# Tesseract - Deprecated/Fallback
+# Tesseract - Last resort fallback
+TESSERACT_AVAILABLE = False
 try:
     import pytesseract
-    # ... (Keeping imports just in case of revert, but READER is primary)
+    TESSERACT_AVAILABLE = True
+    print("[OCR] Tesseract available as last resort")
 except ImportError:
     pass
 
@@ -521,46 +611,89 @@ def detect_drawings_on_page(page, page_num: int):
 
 
 def ocr_image(img: Image.Image) -> str:
-    """OCR an image with EasyOCR - optimized for CAD drawings"""
-    if READER is None:
+    """OCR an image - tries LlamaParse (best), then EasyOCR, then Tesseract"""
+    
+    # Preprocessing for all OCR engines
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    
+    # Upscale small images for better accuracy
+    width, height = img.size
+    if width < 1500 or height < 1500:
+        scale_factor = 2
+        new_size = (width * scale_factor, height * scale_factor)
+        img = img.resize(new_size, Image.Resampling.LANCZOS)
+    
+    # Try LlamaParse first (best accuracy for CAD drawings)
+    if LLAMA_PARSE is not None:
+        temp_path = None
+        try:
+            # Save image to temp file for LlamaParse
+            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            img.save(temp_file.name, format='PNG')
+            temp_file.close()
+            temp_path = temp_file.name
+            
+            # Get file size for logging
+            file_size = os.path.getsize(temp_path)
+            print(f"[OCR] LlamaParse: Processing {temp_path} ({file_size} bytes)")
+            
+            # With nest_asyncio applied at startup, we can use sync load_data directly
+            # nest_asyncio allows nested event loops so LlamaParse's internal async works
+            extra_info = {"file_name": os.path.basename(temp_path)}
+            with open(temp_path, "rb") as f:
+                documents = LLAMA_PARSE.load_data(f, extra_info=extra_info)
+            
+            print(f"[OCR] LlamaParse: Got {len(documents) if documents else 0} document(s)")
+            
+            if documents:
+                text = " ".join([doc.text for doc in documents if doc.text])
+                if text.strip():
+                    print(f"[OCR] LlamaParse SUCCESS: Extracted {len(text)} chars")
+                    return text
+                else:
+                    print(f"[OCR] LlamaParse: Documents returned but no text extracted")
+            else:
+                print(f"[OCR] LlamaParse: No documents returned")
+        except Exception as e:
+            import traceback
+            print(f"[OCR] LlamaParse ERROR: {type(e).__name__}: {e}")
+            print(f"[OCR] LlamaParse TRACEBACK:\n{traceback.format_exc()}")
+        finally:
+            # Clean up temp file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+    
+    # Fallback to EasyOCR
+    if EASY_OCR_READER is not None:
+        try:
+            # Convert to grayscale for EasyOCR
+            img_gray = img.convert('L')
+            img_np = np.array(img_gray)
+            results = EASY_OCR_READER.readtext(img_np, detail=0)
+            text = " ".join(results)
+            if text.strip():
+                return text
+        except Exception as e:
+            print(f"[OCR] EasyOCR error: {e}")
+    
+    # Last resort: Tesseract
+    if TESSERACT_AVAILABLE:
         try:
             from pytesseract import image_to_string
-            # Fallback to Tesseract if EasyOCR failed to load
-            if img.mode != 'L':
-                img = img.convert('L')
-            enhancer = ImageEnhance.Contrast(img)
-            img = enhancer.enhance(2.0)
-            return image_to_string(img)
-        except:
-            return ""
-
-    try:
-        # EasyOCR Preprocessing
-        # 1. Grayscale
-        if img.mode != 'L':
-            img = img.convert('L')
-            
-        # 2. Upscale small images to help detection
-        width, height = img.size
-        if width < 1500 or height < 1500:
-             scale_factor = 2
-             new_size = (width * scale_factor, height * scale_factor)
-             img = img.resize(new_size, Image.Resampling.LANCZOS)
-             
-        # 3. Convert to numpy for EasyOCR
-        img_np = np.array(img)
-        
-        # 4. Extract text
-        # detail=0 returns simple list of strings
-        # workers=0 runs on main thread to avoid pickling issues if any
-        results = READER.readtext(img_np, detail=0)
-        
-        text = " ".join(results)
-        return text
-        
-    except Exception as e:
-        print(f"EasyOCR error: {e}")
-        return ""
+            img_gray = img.convert('L')
+            # Enhance contrast for Tesseract
+            enhancer = ImageEnhance.Contrast(img_gray)
+            img_enhanced = enhancer.enhance(2.0)
+            text = image_to_string(img_enhanced)
+            return text if text.strip() else ""
+        except Exception as e:
+            print(f"[OCR] Tesseract error: {e}")
+    
+    return ""
 
 
 def extract_location_description(img: Image.Image) -> tuple:
@@ -692,18 +825,91 @@ def cleanup_temp_files():
 
 
 def get_sheet_number(page) -> str:
-    """Extract sheet number"""
+    """Extract sheet number - looks for sheet number near title block keywords"""
     try:
         x0, y0, x1, y1 = page.bbox
         w, h = x1 - x0, y1 - y0
-        crop = page.crop((x0 + w * 0.6, y0 + h * 0.8, x1, y1))
-        text = crop.extract_text()
-        if text:
-            match = SHEET_PATTERN.search(text)
-            if match:
-                return match.group(1)
-    except:
-        pass
+        
+        # Sheet number pattern: Letter(s) + digits, common formats
+        # A001, A-001, A.001, A001-A, EL-001, etc.
+        sheet_pattern = re.compile(r'\b([A-Z]{1,4}[-.]?\d{2,4}(?:[-.]?[A-Z0-9]{1,2})?)\b', re.IGNORECASE)
+        
+        # Keywords that typically appear near sheet numbers in title blocks
+        sheet_keywords = ['SHEET', 'SHT', 'DWG', 'DRAWING', 'NO.', 'NO:', 'NUMBER', '#', 'PAGE']
+        
+        # Define regions to search (title blocks are usually in corners)
+        # Format: (left_pct, top_pct, right_pct, bottom_pct, priority)
+        search_regions = [
+            (0.65, 0.85, 1.0, 1.0, 10),   # Bottom-right corner (highest priority - most common)
+            (0.0, 0.85, 0.35, 1.0, 8),    # Bottom-left corner
+            (0.65, 0.0, 1.0, 0.15, 6),    # Top-right corner
+            (0.0, 0.0, 0.35, 0.15, 5),    # Top-left corner
+        ]
+        
+        best_match = None
+        best_score = 0
+        
+        for left_pct, top_pct, right_pct, bottom_pct, region_priority in search_regions:
+            try:
+                crop = page.crop((
+                    x0 + w * left_pct,
+                    y0 + h * top_pct,
+                    x0 + w * right_pct,
+                    y0 + h * bottom_pct
+                ))
+                text = crop.extract_text()
+                
+                if not text:
+                    continue
+                
+                text_upper = text.upper()
+                
+                # Check if this region has sheet-related keywords
+                has_keyword = any(kw in text_upper for kw in sheet_keywords)
+                
+                # Find all potential sheet numbers
+                matches = sheet_pattern.findall(text)
+                
+                for match in matches:
+                    sheet = match.strip().upper()
+                    
+                    # Skip if too short or too long
+                    if len(sheet) < 2 or len(sheet) > 10:
+                        continue
+                    
+                    # Calculate score for this match
+                    score = region_priority
+                    
+                    # Bonus if near keywords
+                    if has_keyword:
+                        score += 20
+                    
+                    # Bonus for common sheet prefixes (A=Architectural, E=Electrical, etc.)
+                    if sheet[0] in 'AESMPCGLD':
+                        score += 10
+                    
+                    # Bonus if starts with letter and has 2-3 digits (most common format)
+                    if re.match(r'^[A-Z]\d{2,3}$', sheet):
+                        score += 15
+                    
+                    # Penalty for patterns that look like tags (e.g., PT-103 is likely a tag, not sheet)
+                    if re.match(r'^[A-Z]{2,}_?[A-Z]*-?\d+$', sheet):
+                        # This looks more like a material tag (PT-103, WC-12, etc.)
+                        score -= 10
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_match = sheet
+                        
+            except Exception:
+                continue
+        
+        if best_match:
+            return best_match
+            
+    except Exception as e:
+        print(f"[SHEET] Error extracting sheet number: {e}")
+    
     return "N/A"
 
 
@@ -737,7 +943,27 @@ async def process_pdf_with_job(job: JobState):
         """Process OCR text to find tags (runs in thread)"""
         # Clean text for better matching (normalize spaces)
         text_clean = " ".join(text.split())
-        found_tags_raw = TAG_PATTERN.findall(text_clean)
+        
+        # Split by whitespace and common delimiters to prevent greedy matching
+        # This helps when OCR preserves spaces between tags
+        tokens = re.split(r'[\s;,]+', text_clean)
+        
+        # Find tags in individual tokens first (prevents greedy cross-token matching)
+        found_tags_raw = []
+        for token in tokens:
+            # Skip very short or very long tokens
+            if len(token) < 2 or len(token) > 30:
+                continue
+            matches = TAG_PATTERN.findall(token)
+            found_tags_raw.extend(matches)
+        
+        # Also try matching on the full text for tags that might span delimiters
+        # But limit match length to prevent super-greedy matches
+        full_matches = TAG_PATTERN.findall(text_clean)
+        for match in full_matches:
+            # Only add if it's a reasonable tag length (not a huge concatenation)
+            if len(match) <= 20 and match not in found_tags_raw:
+                found_tags_raw.append(match)
         
         found_tags = []
         # Normalize found tags (remove spaces)
@@ -762,40 +988,101 @@ async def process_pdf_with_job(job: JobState):
             # Example: OCR finds "MC1", we clean it to "MC1"
             tag_cleaned = clean_tag_text(tag)
             
-            # Try variations for O/0 swapping
-            variations = [tag_cleaned]
-            if 'O' in tag_cleaned:
-                variations.append(tag_cleaned.replace('O', '0'))
-            if '0' in tag_cleaned:
-                variations.append(tag_cleaned.replace('0', 'O'))
+            # Try variations for common OCR character confusion
+            # O ↔ 0, 1 ↔ I ↔ l (lowercase L), A ↔ 4
+            def generate_ocr_variations(s):
+                """Generate all variations of a string with common OCR substitutions."""
+                # Normalize to uppercase first (clean_tag_text already does this, but be safe)
+                s = s.upper()
+                variations = {s}
+                
+                # O ↔ 0
+                if 'O' in s:
+                    variations.add(s.replace('O', '0'))
+                if '0' in s:
+                    variations.add(s.replace('0', 'O'))
+                
+                # 1 ↔ I (OCR often confuses 1 and I and lowercase L)
+                if '1' in s:
+                    variations.add(s.replace('1', 'I'))
+                if 'I' in s:
+                    variations.add(s.replace('I', '1'))
+                # L can also look like 1 in some fonts
+                if 'L' in s:
+                    variations.add(s.replace('L', '1'))
+                
+                # A ↔ 4 (OCR sometimes confuses A and 4)
+                if 'A' in s:
+                    variations.add(s.replace('A', '4'))
+                if '4' in s:
+                    variations.add(s.replace('4', 'A'))
+                
+                # Also try combinations (e.g., both I→1 and A→4)
+                for v in list(variations):
+                    if '1' in v:
+                        variations.add(v.replace('1', 'I'))
+                    if 'I' in v:
+                        variations.add(v.replace('I', '1'))
+                    if 'A' in v:
+                        variations.add(v.replace('A', '4'))
+                    if '4' in v:
+                        variations.add(v.replace('4', 'A'))
+                
+                return variations
+            
+            variations = generate_ocr_variations(tag_cleaned)
             
             # Check against CLEANED_TARGETS
             match_found = False
+            matched_original_tag = None
+            
+            # Step 1: Try exact match first
             for v in variations:
                 if v in CLEANED_TARGETS:
-                    original_tag = CLEANED_MAPPING[v]
-                    
-                    # Deduplication check on original tag
-                    if original_tag in seen_tags_in_drawing:
-                        match_found = True # Recognized, but already added
-                        break
-                        
-                    seen_tags_in_drawing.add(original_tag)
-                    matched_tags.append(original_tag)
-                    
-                    # Use a special debug flag in the result to show in UI log
-                    drawing_results.append({
-                        "material_type": TAG_DESCRIPTIONS.get(original_tag, "Unknown"),
-                        "tag": original_tag,
-                        "sheet": sheet,
-                        "page": page_num,
-                        "description": "", # Will be drawing_id from OpenAI
-                        "location": location_desc,
-                        "confidence": f"{conf:.0%}",
-                        "_debug_match": True 
-                    })
+                    matched_original_tag = CLEANED_MAPPING[v]
                     match_found = True
                     break
+            
+            # Step 2: If no exact match, try SUBSTRING matching
+            # Handles cases like CA_WC-12 (OCR) matching A_WC-12 (target)
+            # OCR might add extra characters due to shapes/borders
+            if not match_found:
+                for v in variations:
+                    for target in CLEANED_TARGETS:
+                        # Check if target is contained in OCR result (OCR added prefix)
+                        # e.g., CAWC12 contains AWC12
+                        if target in v and len(target) >= 3:
+                            matched_original_tag = CLEANED_MAPPING[target]
+                            match_found = True
+                            break
+                        # Check if OCR result is contained in target (OCR missed prefix)
+                        # e.g., WC12 is in AWC12
+                        if v in target and len(v) >= 3:
+                            matched_original_tag = CLEANED_MAPPING[target]
+                            match_found = True
+                            break
+                    if match_found:
+                        break
+            
+            if match_found and matched_original_tag:
+                # Deduplication check on original tag
+                if matched_original_tag in seen_tags_in_drawing:
+                    continue  # Already added, skip
+                    
+                seen_tags_in_drawing.add(matched_original_tag)
+                matched_tags.append(matched_original_tag)
+                
+                # Use a special debug flag in the result to show in UI log
+                drawing_results.append({
+                    "material_type": TAG_DESCRIPTIONS.get(matched_original_tag, "Unknown"),
+                    "tag": matched_original_tag,
+                    "sheet": sheet,
+                    "page": page_num,
+                    "description": "", # Will be drawing_id from OpenAI
+                    "location": location_desc,
+                    "confidence": f"{conf:.0%}",
+                    "_debug_match": True 
+                })
             
             if not match_found and len(found_tags_raw) < 5:
                  # Return a "debug" result that isn't a real match but logs to UI
@@ -841,6 +1128,15 @@ async def process_pdf_with_job(job: JobState):
                     "total": total
                 })
                 
+                # Initialize page tracking for reconnection replay
+                job.processed_pages[page_num] = {
+                    'sheet': sheet,
+                    'full_page_url': None,
+                    'drawings': [],
+                    'total_drawings': 0
+                }
+                job.current_drawing_index = 0
+                
                 # Detect drawings - run in thread to not block heartbeat
                 await job.broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
                 print(f"[JOB-{job.job_id}] Starting detection for page {page_num}")
@@ -866,6 +1162,10 @@ async def process_pdf_with_job(job: JobState):
                     full_page_url = save_image_to_disk(full_page_resized, full_page_filename, quality=75)
                     print(f"[JOB-{job.job_id}] Saved full page to {full_page_url}")
                     
+                    # Track for reconnection replay
+                    job.processed_pages[page_num]['full_page_url'] = full_page_url
+                    job.processed_pages[page_num]['total_drawings'] = len(cropped_drawings)
+                    
                     # Send URL instead of base64 (tiny payload, no connection issues)
                     await job.broadcast({
                         "type": "full_page",
@@ -880,6 +1180,9 @@ async def process_pdf_with_job(job: JobState):
                     
                     # Process each drawing ONE BY ONE - NO PARALLEL
                     for i, crop_data in enumerate(cropped_drawings):
+                        # Track current drawing index for reconnection
+                        job.current_drawing_index = i
+                        
                         # Job continues even with 0 subscribers (allows reconnection)
                         cropped_img = crop_data["image"]
                         conf = crop_data["confidence"]
@@ -892,6 +1195,14 @@ async def process_pdf_with_job(job: JobState):
                         # Save to disk and get URL
                         drawing_filename = f"{job.job_id}-page-{page_num}-drawing-{i+1}.jpg"
                         drawing_url = save_image_to_disk(drawing_img, drawing_filename, quality=80)
+                        
+                        # Track for reconnection replay
+                        job.processed_pages[page_num]['drawings'].append({
+                            'index': i + 1,
+                            'image_url': drawing_url,
+                            'confidence': f"{conf:.0%}",
+                            'bbox': crop_data["bbox"]
+                        })
                         
                         # Send URL instead of base64 (tiny payload, no connection issues)
                         await job.broadcast({
@@ -1463,10 +1774,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 if current_job.job_id in CANCELLATION_TASKS:
                     CANCELLATION_TASKS[current_job.job_id].cancel()
                 
-                # Schedule new cancellation task (60s delay)
-                task = asyncio.create_task(schedule_job_cancellation(current_job.job_id, 60))
+                # Schedule new cancellation task (10 minute delay - plenty of time to return)
+                task = asyncio.create_task(schedule_job_cancellation(current_job.job_id, 600))
                 CANCELLATION_TASKS[current_job.job_id] = task
-                print(f"[WS] ⏰ Scheduled cancellation for job {current_job.job_id} in 60s (reconnect to resume)")
+                print(f"[WS] ⏰ Scheduled cancellation for job {current_job.job_id} in 10 minutes (reconnect to resume)")
             else:
                 print(f"[WS] Unsubscribed from job {current_job.job_id} ({len(current_job.subscribers)} subscribers remaining)")
         
@@ -1656,4 +1967,12 @@ if __name__ == "__main__":
     import uvicorn
     # Start scheduler before running server
     start_scheduled_cleanup()
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Disable WebSocket ping/pong to prevent disconnections when tab is inactive
+    # Browser throttles inactive tabs, can't respond to pings, server would close connection
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        ws_ping_interval=None,  # Disable server pings
+        ws_ping_timeout=None    # Disable ping timeout
+    )

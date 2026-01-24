@@ -85,4 +85,6 @@ openpyxl
 torch
 torchvision
 easyocr
+llama-parse
+nest-asyncio
 apscheduler
