@@ -88,3 +88,4 @@ easyocr
 llama-parse
 nest-asyncio
 apscheduler
+pymupdf

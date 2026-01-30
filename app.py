@@ -382,6 +382,15 @@ try:
 except ImportError:
     pass
 
+# PyMuPDF - Fast PDF text extraction (try before OCR)
+PYMUPDF_AVAILABLE = False
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+    print("[OCR] PyMuPDF available - will try PDF text extraction first")
+except ImportError:
+    print("[OCR] PyMuPDF not installed - install with: pip install pymupdf")
+
 # FastAPI app
 app = FastAPI(title="CAD Material Tracker")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -494,34 +503,91 @@ async def broadcast(message: dict):
             print(f"[BROADCAST] Removed dead connection")
 
 
-def detect_drawings_on_page(page, page_num: int):
-    """Detect CAD drawings using Roboflow and return full page + cropped drawings"""
-    if not ROBOFLOW_AVAILABLE or CLIENT is None:
-        return None, [], None
+def render_page_to_image(page, page_num: int, use_pymupdf: bool = True):
+    """Render PDF page to image - returns image and resolution used
     
-    try:
-        # Use adaptive resolution based on page size
+    Args:
+        page: Either a PyMuPDF page (fitz.Page) or pdfplumber page
+        page_num: Page number (1-indexed)
+        use_pymupdf: If True, expects PyMuPDF page (faster), else pdfplumber page
+    
+    Returns:
+        (img_original, resolution) tuple
+    """
+    import time
+    render_start = time.time()
+    
+    if use_pymupdf and PYMUPDF_AVAILABLE:
+        # Use PyMuPDF for faster rendering
+        # Get page dimensions
+        page_rect = page.rect
+        page_width = page_rect.width
+        page_height = page_rect.height
+        max_dimension = max(page_width, page_height)
+        
+        # Adaptive resolution
+        if max_dimension > 1728:  # ~24 inches at 72 dpi
+            resolution = 100
+            zoom = resolution / 72.0
+        else:
+            resolution = 150
+            zoom = resolution / 72.0
+        
+        # Render page to pixmap (PyMuPDF is much faster)
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img_original = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    else:
+        # Fallback to pdfplumber
         page_width, page_height = page.width, page.height
         max_dimension = max(page_width, page_height)
         
-        if max_dimension > 1728:  # ~24 inches at 72 dpi
+        if max_dimension > 1728:
             resolution = 100
         else:
             resolution = 150
         
         img_original = page.to_image(resolution=resolution).original.convert("RGB")
-        img_original = ImageOps.exif_transpose(img_original)
+    
+    img_original = ImageOps.exif_transpose(img_original)
+    render_time = time.time() - render_start
+    print(f"[RENDER] Page {page_num}: Rendered to image in {render_time:.2f}s (resolution: {resolution} DPI, PyMuPDF: {use_pymupdf and PYMUPDF_AVAILABLE})")
+    
+    return img_original, resolution
+
+
+def detect_drawings_on_image(img_original, page_num: int, resolution: int):
+    """Detect CAD drawings on already-rendered image using Roboflow and return annotated image + cropped drawings
+    
+    Args:
+        img_original: PIL Image of the page (already rendered)
+        page_num: Page number (1-indexed)
+        resolution: Resolution used for rendering (for coordinate scaling)
+    """
+    if not ROBOFLOW_AVAILABLE or CLIENT is None:
+        return None, [], []
+    
+    try:
+        import time
+        start_time = time.time()
+        
         orig_width, orig_height = img_original.size
         
         # Prepare for inference
+        prep_start = time.time()
         img_for_inference = img_original.copy().convert("L").convert("RGB")
         img_resized = img_for_inference.resize((640, 640), Image.Resampling.LANCZOS)
         
         temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
         img_resized.save(temp_file.name, format='JPEG', quality=85)
         temp_file.close()
+        prep_time = time.time() - prep_start
+        print(f"[DETECT] Page {page_num}: Prepared image for inference in {prep_time:.2f}s")
         
+        infer_start = time.time()
         result = CLIENT.infer(temp_file.name, model_id=ROBOFLOW_MODEL_ID)
+        infer_time = time.time() - infer_start
+        print(f"[DETECT] Page {page_num}: Roboflow inference took {infer_time:.2f}s")
         os.unlink(temp_file.name)
         
         scale_x, scale_y = orig_width / 640.0, orig_height / 640.0
@@ -594,6 +660,7 @@ def detect_drawings_on_page(page, page_num: int):
                 })
         
         # Draw boxes on full page image (RED color)
+        post_start = time.time()
         img_annotated = img_original.copy()
         draw = ImageDraw.Draw(img_annotated)
         for i, d in enumerate(drawings):
@@ -602,12 +669,101 @@ def detect_drawings_on_page(page, page_num: int):
             # Draw number label
             draw.rectangle([x1, y1, x1+30, y1+25], fill="#FF3B3B")
             draw.text((x1+8, y1+3), str(i+1), fill="#FFFFFF")
+        post_time = time.time() - post_start
+        
+        total_time = time.time() - start_time
+        print(f"[DETECT] Page {page_num}: Post-processing took {post_time:.2f}s")
+        print(f"[DETECT] Page {page_num}: TOTAL detection time: {total_time:.2f}s (prep: {prep_time:.2f}s, inference: {infer_time:.2f}s, post: {post_time:.2f}s)")
         
         return img_annotated, cropped_images, drawings
         
     except Exception as e:
         print(f"Detection error: {e}")
         return None, [], []
+
+
+def image_coords_to_pdf_coords(image_bbox, image_size, pdf_size, resolution):
+    """
+    Convert image pixel coordinates to PDF coordinates.
+    
+    PDF coordinate system: origin at bottom-left, y increases upward
+    Image coordinate system: origin at top-left, y increases downward
+    
+    Args:
+        image_bbox: (x1, y1, x2, y2) in image pixels (top-left origin)
+        image_size: (width, height) in pixels
+        pdf_size: (width, height) in PDF points
+        resolution: DPI used to render the image
+    
+    Returns:
+        (x1, y1, x2, y2) in PDF coordinates (bottom-left origin)
+    """
+    img_width, img_height = image_size
+    pdf_width, pdf_height = pdf_size
+    
+    x1_img, y1_img, x2_img, y2_img = image_bbox
+    
+    # Scale factor: image pixels to PDF units
+    # resolution = pixels per inch, PDF usually 72 points per inch
+    scale = 72.0 / resolution
+    
+    # Convert x coordinates (straightforward scaling)
+    x1_pdf = x1_img * scale
+    x2_pdf = x2_img * scale
+    
+    # Convert y coordinates (flip because PDF y goes up, image y goes down)
+    y1_pdf = pdf_height - (y2_img * scale)  # Bottom of box in PDF
+    y2_pdf = pdf_height - (y1_img * scale)  # Top of box in PDF
+    
+    return (x1_pdf, y1_pdf, x2_pdf, y2_pdf)
+
+
+def extract_text_from_pdf_region(pdf_path: str, page_num: int, pdf_bbox, pdf_size) -> str:
+    """
+    Extract selectable text from a PDF region using PyMuPDF.
+    
+    Args:
+        pdf_path: Path to PDF file
+        page_num: Page number (1-indexed)
+        pdf_bbox: (x1, y1, x2, y2) in PDF coordinates (bottom-left origin)
+        pdf_size: (width, height) in PDF points
+    
+    Returns:
+        Extracted text string, or empty string if no text or error
+    """
+    if not PYMUPDF_AVAILABLE:
+            return ""
+
+    x1, y1, x2, y2 = pdf_bbox
+    pdf_width, pdf_height = pdf_size
+    
+    # PyMuPDF uses top-left origin, convert from bottom-left PDF coords
+    # y1_pdf (bottom) -> y2_mupdf (bottom from top)
+    # y2_pdf (top) -> y1_mupdf (top from top)
+    y1_mupdf = pdf_height - y2  # Top edge
+    y2_mupdf = pdf_height - y1  # Bottom edge
+    
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc[page_num - 1]  # 0-indexed
+        
+        # Ensure coordinates are within page bounds
+        x1 = max(0, min(x1, pdf_width))
+        y1_mupdf = max(0, min(y1_mupdf, pdf_height))
+        x2 = max(0, min(x2, pdf_width))
+        y2_mupdf = max(0, min(y2_mupdf, pdf_height))
+        
+        # Create a rectangle for the region
+        rect = fitz.Rect(x1, y1_mupdf, x2, y2_mupdf)
+        
+        # Extract text from rectangle
+        text = page.get_text("text", clip=rect)
+        
+        doc.close()
+        return text.strip()
+    except Exception as e:
+        print(f"[PyMuPDF] Error extracting text: {e}")
+        return ""
 
 
 def ocr_image(img: Image.Image) -> str:
@@ -618,12 +774,12 @@ def ocr_image(img: Image.Image) -> str:
         img = img.convert('RGB')
     
     # Upscale small images for better accuracy
-    width, height = img.size
-    if width < 1500 or height < 1500:
-        scale_factor = 2
-        new_size = (width * scale_factor, height * scale_factor)
-        img = img.resize(new_size, Image.Resampling.LANCZOS)
-    
+        width, height = img.size
+        if width < 1500 or height < 1500:
+             scale_factor = 2
+             new_size = (width * scale_factor, height * scale_factor)
+             img = img.resize(new_size, Image.Resampling.LANCZOS)
+             
     # Try LlamaParse first (best accuracy for CAD drawings)
     if LLAMA_PARSE is not None:
         temp_path = None
@@ -824,10 +980,21 @@ def cleanup_temp_files():
                 print(f"Cleanup error for {folder}: {e}")
 
 
-def get_sheet_number(page) -> str:
-    """Extract sheet number - looks for sheet number near title block keywords"""
+def get_sheet_number(page, use_pymupdf: bool = False) -> str:
+    """Extract sheet number - looks for sheet number near title block keywords
+    
+    Args:
+        page: Either a PyMuPDF page (fitz.Page) or pdfplumber page
+        use_pymupdf: If True, expects PyMuPDF page, else pdfplumber page
+    """
     try:
-        x0, y0, x1, y1 = page.bbox
+        if use_pymupdf and PYMUPDF_AVAILABLE:
+            # PyMuPDF page
+            rect = page.rect
+            x0, y0, x1, y1 = rect.x0, rect.y0, rect.x1, rect.y1
+        else:
+            # pdfplumber page
+            x0, y0, x1, y1 = page.bbox
         w, h = x1 - x0, y1 - y0
         
         # Sheet number pattern: Letter(s) + digits, common formats
@@ -851,13 +1018,24 @@ def get_sheet_number(page) -> str:
         
         for left_pct, top_pct, right_pct, bottom_pct, region_priority in search_regions:
             try:
-                crop = page.crop((
-                    x0 + w * left_pct,
-                    y0 + h * top_pct,
-                    x0 + w * right_pct,
-                    y0 + h * bottom_pct
-                ))
-                text = crop.extract_text()
+                if use_pymupdf and PYMUPDF_AVAILABLE:
+                    # PyMuPDF: create rect and extract text from region
+                    crop_rect = fitz.Rect(
+                        x0 + w * left_pct,
+                        y0 + h * top_pct,
+                        x0 + w * right_pct,
+                        y0 + h * bottom_pct
+                    )
+                    text = page.get_text("text", clip=crop_rect)
+                else:
+                    # pdfplumber: use crop method
+                    crop = page.crop((
+                        x0 + w * left_pct,
+                        y0 + h * top_pct,
+                        x0 + w * right_pct,
+                        y0 + h * bottom_pct
+                    ))
+                    text = crop.extract_text()
                 
                 if not text:
                     continue
@@ -938,9 +1116,18 @@ async def process_pdf_with_job(job: JobState):
             CLEANED_MAPPING[ct] = t
     
     CLEANED_TARGETS = list(CLEANED_MAPPING.keys())
-
-    def process_ocr_and_tags(text, conf, sheet, page_num, location_desc):
-        """Process OCR text to find tags (runs in thread)"""
+    
+    def process_ocr_and_tags(text, conf, sheet, page_num, location_desc, is_ocr_text=False):
+        """Process text to find tags (runs in thread)
+        
+        Args:
+            text: Extracted text
+            conf: Confidence score
+            sheet: Sheet number
+            page_num: Page number
+            location_desc: Location description
+            is_ocr_text: True if text came from OCR, False if from PyMuPDF (accurate text extraction)
+        """
         # Clean text for better matching (normalize spaces)
         text_clean = " ".join(text.split())
         
@@ -948,161 +1135,213 @@ async def process_pdf_with_job(job: JobState):
         # This helps when OCR preserves spaces between tags
         tokens = re.split(r'[\s;,]+', text_clean)
         
-        # Find tags in individual tokens first (prevents greedy cross-token matching)
+        # Use full text matching ONLY to get ALL occurrences (including duplicates)
+        # This naturally captures multiple occurrences of the same tag in the text
+        # findall() returns all non-overlapping matches, so if X-6B appears twice, 
+        # it will return ["X-6B", "X-6B"] exactly
         found_tags_raw = []
-        for token in tokens:
-            # Skip very short or very long tokens
-            if len(token) < 2 or len(token) > 30:
-                continue
-            matches = TAG_PATTERN.findall(token)
-            found_tags_raw.extend(matches)
-        
-        # Also try matching on the full text for tags that might span delimiters
-        # But limit match length to prevent super-greedy matches
         full_matches = TAG_PATTERN.findall(text_clean)
         for match in full_matches:
             # Only add if it's a reasonable tag length (not a huge concatenation)
-            if len(match) <= 20 and match not in found_tags_raw:
-                found_tags_raw.append(match)
+            if len(match) <= 20:
+                found_tags_raw.append(match)  # Keep all occurrences, even duplicates
         
         found_tags = []
-        # Normalize found tags (remove spaces)
-        seen_raw_tags = set()
+        # Normalize found tags (remove spaces) - preserve all occurrences
         for t in found_tags_raw:
             norm_tag = t.replace(" ", "")
-            if norm_tag not in seen_raw_tags:
-                found_tags.append(norm_tag)
-                seen_raw_tags.add(norm_tag)
+            found_tags.append(norm_tag)  # Keep all occurrences, including duplicates
 
         matched_tags = []
         drawing_results = []
         
-        # Deduplicate: Only report each unique original tag ONCE per drawing
-        seen_tags_in_drawing = set()
+        # Count occurrences of each tag (preserve original format - PL-03 and PL03 are different)
+        # For PyMuPDF: Count by original tag format
+        # For OCR: Still count by original, but matching will use cleaned form
+        tag_counts = {}
+        for tag in found_tags:
+            # Normalize for counting: remove spaces but keep other separators
+            normalized = tag.replace(" ", "").upper()
+            tag_counts[normalized] = tag_counts.get(normalized, 0) + 1
+        
+        # Get unique tags to process (preserve original format)
+        unique_tags_to_process = {}
+        for tag in found_tags:
+            normalized = tag.replace(" ", "").upper()
+            if normalized not in unique_tags_to_process:
+                unique_tags_to_process[normalized] = tag  # Keep original for reference
         
         # Capture OCR text sample for debugging UI
         ocr_sample = text_clean[:50] + "..." if len(text_clean) > 50 else text_clean
         
-        for tag in found_tags:
-            # Clean the tag found by OCR for comparison
-            # Example: OCR finds "MC1", we clean it to "MC1"
-            tag_cleaned = clean_tag_text(tag)
+        # Process each unique tag
+        for normalized_tag, original_tag in unique_tags_to_process.items():
+            # Get occurrence count for this tag
+            occurrence_count = tag_counts.get(normalized_tag, 1)
             
-            # Try variations for common OCR character confusion
-            # O ↔ 0, 1 ↔ I ↔ l (lowercase L), A ↔ 4
-            def generate_ocr_variations(s):
-                """Generate all variations of a string with common OCR substitutions."""
-                # Normalize to uppercase first (clean_tag_text already does this, but be safe)
-                s = s.upper()
-                variations = {s}
-                
-                # O ↔ 0
-                if 'O' in s:
-                    variations.add(s.replace('O', '0'))
-                if '0' in s:
-                    variations.add(s.replace('0', 'O'))
-                
-                # 1 ↔ I (OCR often confuses 1 and I and lowercase L)
-                if '1' in s:
-                    variations.add(s.replace('1', 'I'))
-                if 'I' in s:
-                    variations.add(s.replace('I', '1'))
-                # L can also look like 1 in some fonts
-                if 'L' in s:
-                    variations.add(s.replace('L', '1'))
-                
-                # A ↔ 4 (OCR sometimes confuses A and 4)
-                if 'A' in s:
-                    variations.add(s.replace('A', '4'))
-                if '4' in s:
-                    variations.add(s.replace('4', 'A'))
-                
-                # Also try combinations (e.g., both I→1 and A→4)
-                for v in list(variations):
-                    if '1' in v:
-                        variations.add(v.replace('1', 'I'))
-                    if 'I' in v:
-                        variations.add(v.replace('I', '1'))
-                    if 'A' in v:
-                        variations.add(v.replace('A', '4'))
-                    if '4' in v:
-                        variations.add(v.replace('4', 'A'))
-                
-                return variations
+            # Clean tag for matching (removes all separators)
+            tag_cleaned = clean_tag_text(original_tag)
             
-            variations = generate_ocr_variations(tag_cleaned)
+            # Generate variations based on text source
+            if is_ocr_text:
+                # For OCR text: Use full OCR variation logic (character confusion)
+                # O ↔ 0, 1 ↔ I ↔ l (lowercase L), A ↔ 4
+                def generate_ocr_variations(s):
+                    """Generate all variations of a string with common OCR substitutions."""
+                    # Normalize to uppercase first (clean_tag_text already does this, but be safe)
+                    s = s.upper()
+                    variations = {s}
+                    
+                    # O ↔ 0
+                    if 'O' in s:
+                        variations.add(s.replace('O', '0'))
+                    if '0' in s:
+                        variations.add(s.replace('0', 'O'))
+                    
+                    # 1 ↔ I (OCR often confuses 1 and I and lowercase L)
+                    if '1' in s:
+                        variations.add(s.replace('1', 'I'))
+                    if 'I' in s:
+                        variations.add(s.replace('I', '1'))
+                    # L can also look like 1 in some fonts
+                    if 'L' in s:
+                        variations.add(s.replace('L', '1'))
+                    
+                    # A ↔ 4 (OCR sometimes confuses A and 4)
+                    if 'A' in s:
+                        variations.add(s.replace('A', '4'))
+                    if '4' in s:
+                        variations.add(s.replace('4', 'A'))
+                    
+                    # Also try combinations (e.g., both I→1 and A→4)
+                    for v in list(variations):
+                        if '1' in v:
+                            variations.add(v.replace('1', 'I'))
+                        if 'I' in v:
+                            variations.add(v.replace('I', '1'))
+                        if 'A' in v:
+                            variations.add(v.replace('A', '4'))
+                        if '4' in v:
+                            variations.add(v.replace('4', 'A'))
+                    
+                    return variations
+                
+                variations = generate_ocr_variations(tag_cleaned)
+            else:
+                # For PyMuPDF text (accurate): Only use the cleaned version
+                # Separator differences (PL03 vs PL-03) are already handled by clean_tag_text
+                # No need for character confusion variations since PyMuPDF is accurate
+                variations = {tag_cleaned}
             
-            # Check against CLEANED_TARGETS
+            # Check against targets - different logic for OCR vs PyMuPDF
             match_found = False
             matched_original_tag = None
             
-            # Step 1: Try exact match first
-            for v in variations:
-                if v in CLEANED_TARGETS:
-                    matched_original_tag = CLEANED_MAPPING[v]
+            if not is_ocr_text:
+                # For PyMuPDF (accurate text): Try exact matching first (preserve separators)
+                # "PL-03" should only match "PL-03", not "PL03"
+                # Step 1: Try exact match on original tag (with separators)
+                if original_tag in target_tags:
+                    matched_original_tag = original_tag
                     match_found = True
-                    break
-            
-            # Step 2: If no exact match, try SUBSTRING matching
-            # Handles cases like CA_WC-12 (OCR) matching A_WC-12 (target)
-            # OCR might add extra characters due to shapes/borders
-            if not match_found:
+                # Step 2: Try exact match on normalized tag (spaces removed)
+                elif not match_found:
+                    normalized = original_tag.replace(" ", "").upper()
+                    if normalized in target_tags:
+                        matched_original_tag = normalized
+                        match_found = True
+                # Step 3: Only use cleaned matching as last resort for PyMuPDF
+                # This handles cases where target has different separator format
+                # DISABLED PER USER REQUEST: PyMuPDF text is accurate and should not use fuzzy matching
+                # if not match_found:
+                #     for v in variations:
+                #         if v in CLEANED_TARGETS:
+                #             matched_original_tag = CLEANED_MAPPING[v]
+                #             match_found = True
+                #             break
+            else:
+                # For OCR text: Use cleaned matching (current behavior)
+                # OCR might miss/add separators, so "PL03" could be "PL-03"
+                # Step 1: Try exact match on cleaned form
                 for v in variations:
-                    for target in CLEANED_TARGETS:
-                        # Check if target is contained in OCR result (OCR added prefix)
-                        # e.g., CAWC12 contains AWC12
-                        if target in v and len(target) >= 3:
-                            matched_original_tag = CLEANED_MAPPING[target]
-                            match_found = True
-                            break
-                        # Check if OCR result is contained in target (OCR missed prefix)
-                        # e.g., WC12 is in AWC12
-                        if v in target and len(v) >= 3:
-                            matched_original_tag = CLEANED_MAPPING[target]
-                            match_found = True
-                            break
-                    if match_found:
+                    if v in CLEANED_TARGETS:
+                        matched_original_tag = CLEANED_MAPPING[v]
+                        match_found = True
                         break
+
+                # Step 2: If no exact match, try SUBSTRING matching
+                # Handles cases like CA_WC-12 (OCR) matching A_WC-12 (target)
+                if not match_found:
+                    for v in variations:
+                        for target in CLEANED_TARGETS:
+                            # Check if target is contained in OCR result (OCR added prefix)
+                            if target in v and len(target) >= 3:
+                                matched_original_tag = CLEANED_MAPPING[target]
+                                match_found = True
+                                break
+                            # Check if OCR result is contained in target (OCR missed prefix)
+                            if v in target and len(v) >= 3:
+                                matched_original_tag = CLEANED_MAPPING[target]
+                                match_found = True
+                                break
+                        if match_found:
+                            break
             
             if match_found and matched_original_tag:
-                # Deduplication check on original tag
-                if matched_original_tag in seen_tags_in_drawing:
-                    continue  # Already added, skip
+                # Create one result for each occurrence of this tag in the text
+                # If PL-03 appears 4 times (as PL-03 or PL03), create 4 results
+                for occurrence_num in range(1, occurrence_count + 1):
+                    matched_tags.append(matched_original_tag)
                     
-                seen_tags_in_drawing.add(matched_original_tag)
-                matched_tags.append(matched_original_tag)
-                
-                # Use a special debug flag in the result to show in UI log
-                drawing_results.append({
-                    "material_type": TAG_DESCRIPTIONS.get(matched_original_tag, "Unknown"),
-                    "tag": matched_original_tag,
-                    "sheet": sheet,
-                    "page": page_num,
-                    "description": "", # Will be drawing_id from OpenAI
-                    "location": location_desc,
-                    "confidence": f"{conf:.0%}",
-                    "_debug_match": True 
-                })
+                    # Use a special debug flag in the result to show in UI log
+                    drawing_results.append({
+                        "material_type": TAG_DESCRIPTIONS.get(matched_original_tag, "Unknown"),
+                        "tag": matched_original_tag,
+                        "sheet": sheet,
+                        "page": page_num,
+                        "description": "", # Will be drawing_id from OpenAI
+                        "location": location_desc,
+                        "confidence": f"{conf:.0%}",
+                        "occurrence": occurrence_num,  # Track which occurrence this is
+                        "_debug_match": True 
+                    })
             
             if not match_found and len(found_tags_raw) < 5:
-                 # Return a "debug" result that isn't a real match but logs to UI
-                 drawing_results.append({
-                     "_debug_ignored": True,
-                     "tag": tag.upper(),
-                     "variations": variations,
-                     "ocr_text": ocr_sample
-                 })
+                # Return a "debug" result that isn't a real match but logs to UI
+                drawing_results.append({
+                    "_debug_ignored": True,
+                    "tag": tag.upper(),
+                    "variations": variations,
+                    "ocr_text": ocr_sample
+                })
 
         return matched_tags, drawing_results
     
     try:
-        with pdfplumber.open(job.pdf_path) as pdf:
-            total = min(job.end_page, len(pdf.pages)) - job.start_page + 1
+        import time
+        start_time = time.time()
+        print(f"[JOB-{job.job_id}] Opening PDF...")
+        
+        # Use PyMuPDF for faster PDF opening (much faster than pdfplumber)
+        if PYMUPDF_AVAILABLE:
+            pdf_doc = fitz.open(job.pdf_path)
+            pdf_open_time = time.time() - start_time
+            print(f"[JOB-{job.job_id}] PDF opened with PyMuPDF in {pdf_open_time:.2f}s")
+            use_pymupdf = True
+        else:
+            # Fallback to pdfplumber
+            pdf_doc = pdfplumber.open(job.pdf_path)
+            pdf_open_time = time.time() - start_time
+            print(f"[JOB-{job.job_id}] PDF opened with pdfplumber in {pdf_open_time:.2f}s")
+            use_pymupdf = False
+        
+        try:
+            total = min(job.end_page, len(pdf_doc)) - job.start_page + 1
             job.total_pages = total
             
             await job.broadcast({"type": "info", "total_pages": total})
             
-            for idx, page_num in enumerate(range(job.start_page, min(job.end_page + 1, len(pdf.pages) + 1))):
+            for idx, page_num in enumerate(range(job.start_page, min(job.end_page + 1, len(pdf_doc) + 1))):
                 job.current_page = page_num
                 
                 # Job continues even with 0 subscribers (60s timeout handles cancellation)
@@ -1112,8 +1351,11 @@ async def process_pdf_with_job(job: JobState):
                 
                 # Get page AND sheet number in thread (both can block)
                 def get_page_and_sheet():
-                    page = pdf.pages[page_num - 1]
-                    sheet = get_sheet_number(page)
+                    if use_pymupdf:
+                        page = pdf_doc[page_num - 1]  # PyMuPDF uses 0-indexed
+                    else:
+                        page = pdf_doc.pages[page_num - 1]  # pdfplumber
+                    sheet = get_sheet_number(page, use_pymupdf=use_pymupdf)
                     return page, sheet
                 
                 page, sheet = await asyncio.to_thread(get_page_and_sheet)
@@ -1137,42 +1379,83 @@ async def process_pdf_with_job(job: JobState):
                 }
                 job.current_drawing_index = 0
                 
-                # Detect drawings - run in thread to not block heartbeat
-                await job.broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
-                print(f"[JOB-{job.job_id}] Starting detection for page {page_num}")
+                # Step 1: Render page to image first (fast operation)
+                await job.broadcast({"type": "log", "level": "info", "message": f"Rendering page {page_num}..."})
+                print(f"[JOB-{job.job_id}] Rendering page {page_num}")
                 try:
-                    full_page_img, cropped_drawings, drawing_data = await asyncio.to_thread(
-                        detect_drawings_on_page, page, page_num
+                    img_original, resolution = await asyncio.to_thread(
+                        render_page_to_image, page, page_num, use_pymupdf
                     )
-                    print(f"[JOB-{job.job_id}] Detection complete: {len(cropped_drawings) if cropped_drawings else 0} drawings")
+                    print(f"[JOB-{job.job_id}] Page rendered successfully")
                 except Exception as e:
-                    print(f"[JOB-{job.job_id}] Detection ERROR: {type(e).__name__}: {e}")
-                    full_page_img, cropped_drawings, drawing_data = None, [], []
+                    print(f"[JOB-{job.job_id}] Render ERROR: {type(e).__name__}: {e}")
+                    img_original, resolution = None, None
                 
-                if full_page_img:
-                    # Save full page image to disk and send URL (no size limit issues)
-                    full_page_resized = full_page_img.copy()
-                    if full_page_resized.width > 1400:
-                        ratio = 1400 / full_page_resized.width
-                        new_height = int(full_page_resized.height * ratio)
-                        full_page_resized = full_page_resized.resize((1400, new_height), Image.Resampling.LANCZOS)
+                # Step 2: Send original image immediately (without bounding boxes)
+                if img_original:
+                    # Save original full page image to disk and send URL
+                    original_resized = img_original.copy()
+                    if original_resized.width > 1400:
+                        ratio = 1400 / original_resized.width
+                        new_height = int(original_resized.height * ratio)
+                        original_resized = original_resized.resize((1400, new_height), Image.Resampling.LANCZOS)
                     
                     # Save to disk and get URL
-                    full_page_filename = f"{job.job_id}-page-{page_num}-full.jpg"
-                    full_page_url = save_image_to_disk(full_page_resized, full_page_filename, quality=75)
-                    print(f"[JOB-{job.job_id}] Saved full page to {full_page_url}")
+                    original_filename = f"{job.job_id}-page-{page_num}-original.jpg"
+                    original_url = save_image_to_disk(original_resized, original_filename, quality=75)
+                    print(f"[JOB-{job.job_id}] Saved original page to {original_url}")
                     
-                    # Track for reconnection replay
-                    job.processed_pages[page_num]['full_page_url'] = full_page_url
-                    job.processed_pages[page_num]['total_drawings'] = len(cropped_drawings)
-                    
-                    # Send URL instead of base64 (tiny payload, no connection issues)
+                    # Send original image (without boxes) immediately - user sees this right away
                     await job.broadcast({
                         "type": "full_page",
-                        "image_url": full_page_url,  # URL instead of base64
+                        "image_url": original_url,
                         "page": page_num,
                         "sheet": sheet,
-                        "drawing_count": len(cropped_drawings)
+                        "drawing_count": 0,  # Not yet detected
+                        "annotated": False  # Flag to indicate this is the original
+                    })
+                
+                # Step 3: Now detect drawings using Roboflow (this takes time)
+                if img_original and resolution:
+                    await job.broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
+                    print(f"[JOB-{job.job_id}] Starting detection for page {page_num}")
+                    try:
+                        img_annotated, cropped_drawings, drawing_data = await asyncio.to_thread(
+                            detect_drawings_on_image, img_original, page_num, resolution
+                        )
+                        print(f"[JOB-{job.job_id}] Detection complete: {len(cropped_drawings) if cropped_drawings else 0} drawings")
+                    except Exception as e:
+                        print(f"[JOB-{job.job_id}] Detection ERROR: {type(e).__name__}: {e}")
+                        img_annotated, cropped_drawings, drawing_data = None, [], []
+                else:
+                    img_annotated, cropped_drawings, drawing_data = None, [], []
+                
+                # Step 4: Send annotated image (with bounding boxes) after detection completes
+                if img_annotated:
+                    # Save annotated full page image to disk and send URL
+                    annotated_resized = img_annotated.copy()
+                    if annotated_resized.width > 1400:
+                        ratio = 1400 / annotated_resized.width
+                        new_height = int(annotated_resized.height * ratio)
+                        annotated_resized = annotated_resized.resize((1400, new_height), Image.Resampling.LANCZOS)
+                    
+                    # Save to disk and get URL
+                    annotated_filename = f"{job.job_id}-page-{page_num}-full.jpg"
+                    annotated_url = save_image_to_disk(annotated_resized, annotated_filename, quality=75)
+                    print(f"[JOB-{job.job_id}] Saved annotated page to {annotated_url}")
+                    
+                    # Track for reconnection replay (use annotated version)
+                    job.processed_pages[page_num]['full_page_url'] = annotated_url
+                    job.processed_pages[page_num]['total_drawings'] = len(cropped_drawings)
+                    
+                    # Send annotated image (with boxes) after detection - replaces original in UI
+                    await job.broadcast({
+                        "type": "full_page",
+                        "image_url": annotated_url,  # URL instead of base64
+                        "page": page_num,
+                        "sheet": sheet,
+                        "drawing_count": len(cropped_drawings),
+                        "annotated": True  # Flag to indicate this has bounding boxes
                     })
                 
                 if cropped_drawings:
@@ -1220,32 +1503,86 @@ async def process_pdf_with_job(job: JobState):
                             "message": f"Analyzing drawing {i + 1}/{num_drawings}..."
                         })
                         
-                        # Step 1: Run OCR First (sequential)
+                        # Step 1: Try PyMuPDF first (fast PDF text extraction), then OCR fallback
+                        text = ""
+                        is_ocr_text = False  # Track if text came from OCR
                         try:
-                            await job.broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
-                            print(f"[JOB-{job.job_id}] Starting OCR for drawing {i+1}")
-                            text = await asyncio.to_thread(ocr_image, cropped_img)
-                            print(f"[JOB-{job.job_id}] OCR complete: {len(text)} chars")
+                            # Try PyMuPDF extraction from PDF first
+                            if PYMUPDF_AVAILABLE and img_original and resolution:
+                                await job.broadcast({"type": "log", "level": "info", "message": f"Extracting text from PDF..."})
+                                
+                                # Get PDF size (use resolution we already calculated from render)
+                                # Handle both PyMuPDF and pdfplumber page objects
+                                if use_pymupdf and PYMUPDF_AVAILABLE:
+                                    page_rect = page.rect
+                                    page_width = page_rect.width
+                                    page_height = page_rect.height
+                                else:
+                                    page_width, page_height = page.width, page.height
+                                
+                                # Get image size and PDF size
+                                image_size = img_original.size  # (width, height) in pixels
+                                pdf_size = (page_width, page_height)  # (width, height) in PDF points
+                                
+                                # Get image bbox from crop_data
+                                image_bbox = crop_data["bbox"]  # (x1, y1, x2, y2) in image pixels
+                                
+                                # Convert to PDF coordinates
+                                pdf_bbox = image_coords_to_pdf_coords(image_bbox, image_size, pdf_size, resolution)
+                                
+                                # Extract text using PyMuPDF
+                                def extract_pdf_text():
+                                    return extract_text_from_pdf_region(job.pdf_path, page_num, pdf_bbox, pdf_size)
+                                
+                                text = await asyncio.to_thread(extract_pdf_text)
+                                
+                                if text:
+                                    print(f"[JOB-{job.job_id}] PyMuPDF extracted {len(text)} chars from PDF")
+                                    await job.broadcast({
+                                        "type": "log",
+                                        "level": "info",
+                                        "message": f"✅ Extracted {len(text)} chars from PDF text"
+                                    })
+                                    is_ocr_text = False  # Text came from PyMuPDF (accurate)
+                                else:
+                                    print(f"[JOB-{job.job_id}] PyMuPDF: No selectable text found, falling back to OCR")
+                                    await job.broadcast({
+                                        "type": "log",
+                                        "level": "info",
+                                        "message": f"No PDF text found, using OCR..."
+                                    })
                             
-                            # Log raw OCR for debugging
-                            cleaned_snippet = text.replace('\n', ' ')[:100]
-                            await job.broadcast({
-                                "type": "log",
-                                "level": "info", 
-                                "message": f"RAW OCR OUT: {cleaned_snippet}..."
-                            })
+                            # Fallback to OCR if PyMuPDF didn't find text
+                            if not text:
+                                await job.broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
+                                print(f"[JOB-{job.job_id}] Starting OCR for drawing {i+1}")
+                                text = await asyncio.to_thread(ocr_image, cropped_img)
+                                print(f"[JOB-{job.job_id}] OCR complete: {len(text)} chars")
+                                is_ocr_text = True  # Text came from OCR (may have errors)
+                            
+                            # Log raw text for debugging
+                            if text:
+                                cleaned_snippet = text.replace('\n', ' ')[:100]
+                                await job.broadcast({
+                                    "type": "log",
+                                    "level": "info", 
+                                    "message": f"RAW TEXT OUT: {cleaned_snippet}..."
+                                })
 
                         except Exception as e:
-                            print(f"[JOB-{job.job_id}] OCR ERROR: {type(e).__name__}: {e}")
+                            print(f"[JOB-{job.job_id}] Text extraction ERROR: {type(e).__name__}: {e}")
+                            import traceback
+                            print(traceback.format_exc())
                             text = ""
-                        
+                            is_ocr_text = False  # Default to False if error
+        
                         # Step 2: Check for tags
-                        # Run OCR and tag matching in thread
+                        # Run tag matching in thread
                         location_desc = "" # Default empty
                         temp_results = []
                         
                         matched_tags, drawing_results = await asyncio.to_thread(
-                            process_ocr_and_tags, text, conf, sheet, page_num, "" # Pass empty location first
+                            process_ocr_and_tags, text, conf, sheet, page_num, "", is_ocr_text
                         )
                         
                         # Step 3: Run OpenAI ONLY if tags found
@@ -1266,6 +1603,7 @@ async def process_pdf_with_job(job: JobState):
                              await job.broadcast({"type": "log", "level": "info", "message": f"No tags, skipping location extraction"})
 
                         # Step 4: Update results with location and drawing index
+                        # Tags are already deduplicated within each drawing (one tag per drawing)
                         for r in drawing_results:
                             r['location'] = location_desc
                             r['description'] = drawing_id # Use alphanumeric code as description
@@ -1340,8 +1678,10 @@ async def process_pdf_with_job(job: JobState):
                 
                 # CRITICAL: Release memory after each page to prevent OOM
                 del page
-                if full_page_img:
-                    del full_page_img
+                if img_original:
+                    del img_original
+                if img_annotated:
+                    del img_annotated
                 if cropped_drawings:
                     del cropped_drawings
                 if drawing_data:
@@ -1355,7 +1695,7 @@ async def process_pdf_with_job(job: JobState):
             
             # Filter valid results ONLY
             final_results = []
-            seen_in_final = set() # Extra safety against duplicates
+            seen_in_final = set() # Deduplicate only truly identical entries
             
             for r in results:
                 # 1. Skip debug objects
@@ -1366,11 +1706,12 @@ async def process_pdf_with_job(job: JobState):
                 if not r.get("tag") or not r.get("sheet"):
                     continue
                 
-                # 3. Final Deduplication
-                # Create a signature: tag + sheet + page + drawing_index
-                sig = f"{r['tag']}-{r['sheet']}-{r['page']}-{r.get('drawing_index', '0')}"
+                # 3. Final Deduplication - include occurrence counter to allow multiple instances
+                # This allows the same tag to appear multiple times even in the same drawing
+                occurrence = r.get('occurrence', 1)
+                sig = f"{r['tag']}-{r['sheet']}-{r['page']}-{r.get('drawing_index', '0')}-{occurrence}"
                 if sig in seen_in_final:
-                    continue
+                    continue  # Already processed this specific occurrence
                 seen_in_final.add(sig)
                 final_results.append(r)
             
@@ -1404,6 +1745,13 @@ async def process_pdf_with_job(job: JobState):
             
             print(f"[JOB-{job.job_id}] COMPLETED - {len(final_results)} unique tags found")
             
+        finally:
+            # Close PDF properly
+            if use_pymupdf and PYMUPDF_AVAILABLE:
+                pdf_doc.close()
+            elif not use_pymupdf:
+                pdf_doc.close()
+            
     except Exception as e:
         job.status = JobStatus.FAILED
         job.error = str(e)
@@ -1412,7 +1760,7 @@ async def process_pdf_with_job(job: JobState):
         traceback.print_exc()
         await job.broadcast({"type": "error", "message": str(e)})
     
-    # Auto-cleanup AFTER PDF is closed (outside the 'with' block)
+    # Auto-cleanup AFTER PDF is closed
     if AUTO_CLEANUP:
         await asyncio.sleep(0.5)  # Small delay to ensure file handles are released
         cleanup_temp_files()
@@ -1598,8 +1946,15 @@ async def upload_pdf(file: UploadFile = File(...)):
     with open(file_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
     
-    with pdfplumber.open(file_path) as pdf:
-        page_count = len(pdf.pages)
+    # Use PyMuPDF for faster page count (much faster than pdfplumber)
+    if PYMUPDF_AVAILABLE:
+        pdf_doc = fitz.open(file_path)
+        page_count = len(pdf_doc)
+        pdf_doc.close()
+    else:
+        # Fallback to pdfplumber
+        with pdfplumber.open(file_path) as pdf:
+            page_count = len(pdf.pages)
     
     return {"filename": file.filename, "path": file_path, "pages": page_count}
 

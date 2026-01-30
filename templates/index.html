@@ -2507,7 +2507,10 @@
                     document.getElementById('full-page-preview').innerHTML =
                         `<img src="${data.image_url}" alt="Page ${data.page}">`;
                     document.getElementById('drawing-count').textContent = `${data.drawing_count} drawings`;
-                    addLog('success', `Found ${data.drawing_count} drawings on page ${data.page}`);
+                    // Only show success log when annotated image arrives (with bounding boxes)
+                    if (data.annotated === true) {
+                        addLog('success', `Found ${data.drawing_count} drawings on page ${data.page}`);
+                    }
                     break;
 
                 case 'drawing':
