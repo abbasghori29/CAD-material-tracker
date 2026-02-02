@@ -91,6 +91,12 @@ jobs:
             echo "📦 Installing OpenCV dependencies..."
             sudo dnf install -y mesa-libGL mesa-libGL-devel libglvnd-glx || true
             
+            # Install font libraries for PyMuPDF text extraction
+            echo "🔤 Installing font libraries for PyMuPDF..."
+            sudo dnf install -y liberation-fonts dejavu-fonts-all fontconfig || true
+            sudo fc-cache -fv || true
+            echo "✅ Font libraries installed"
+            
             # ========================================
             # TESSERACT OCR (Build from source for Amazon Linux 2023)
             # ========================================
@@ -355,6 +361,7 @@ jobs:
             echo "   - Python 3.12: $(python3.12 --version 2>&1 || echo 'Not found')"
             echo "   - Tesseract: $(tesseract --version 2>&1 | head -1 || echo 'Not found')"
             echo "   - Nginx: $(nginx -v 2>&1 || echo 'Not found')"
+            echo "   - Fonts: $(fc-list | wc -l 2>/dev/null || echo '0') fonts available"
             echo ""
             echo "🔑 API Keys Configured:"
             echo "   - Roboflow: $([ -n '${{ secrets.ROBOFLOW_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"

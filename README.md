@@ -106,9 +106,16 @@ Edit the `.env` file and add your configuration:
 ```env
 ROBOFLOW_API_KEY=your_roboflow_api_key_here
 ROBOFLOW_MODEL_ID=cad-drawing-iy9tc/11
+ALWAYS_PYMUPDF=True
 ```
 
 Replace `your_roboflow_api_key_here` with your actual Roboflow API key.
+
+**Optional: `ALWAYS_PYMUPDF=True`**
+- When set to `True`, the system will **only use PyMuPDF** for text extraction and **never fall back to OCR**
+- This prevents OCR errors from creating false tag matches
+- Recommended if your PDFs have selectable text (most CAD PDFs do)
+- If a region has no selectable text, it will be skipped rather than using OCR
 
 #### Step 6: Verify Installation
 
@@ -125,7 +132,7 @@ tesseract --version
 # Windows:
 if (Test-Path .env) { echo ".env file found" }
 
-# Mac/Linux:
+# Mac/Linux::
 test -f .env && echo ".env file found"
 ```
 
