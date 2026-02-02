@@ -64,3 +64,6 @@ Thumbs.db
 *.temp
 *.bak
 
+# Test files
+test_tag_extraction.py
+

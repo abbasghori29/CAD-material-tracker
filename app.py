@@ -334,6 +334,11 @@ ROBOFLOW_MODEL_ID = os.getenv("ROBOFLOW_MODEL_ID", "cad-drawing-iy9tc/11")
 CLIENT = None
 ROBOFLOW_AVAILABLE = False
 
+# Force PyMuPDF only (no OCR fallback) - set ALWAYS_PYMUPDF=True in .env
+ALWAYS_PYMUPDF = os.getenv("ALWAYS_PYMUPDF", "True").lower() in ("true", "1", "yes")
+if ALWAYS_PYMUPDF:
+    print("[CONFIG] ALWAYS_PYMUPDF=True - OCR fallback disabled, using PyMuPDF only")
+
 try:
     import importlib
     inference_sdk = importlib.import_module('inference_sdk')
@@ -652,11 +657,27 @@ def detect_drawings_on_image(img_original, page_num: int, resolution: int):
             for d in final_detections:
                 x1, y1, x2, y2 = d['bbox']
                 drawings.append(d)
-                cropped = img_original.crop((int(x1), int(y1), int(x2), int(y2)))
+                
+                # Add padding to all four sides (5% of bounding box dimensions)
+                # This prevents tags at the edge from being cut off
+                padding_pct = 0.05  # 5% padding
+                bbox_width = x2 - x1
+                bbox_height = y2 - y1
+                padding_x = bbox_width * padding_pct
+                padding_y = bbox_height * padding_pct
+                
+                # Apply padding, ensuring we don't exceed image boundaries
+                padded_x1 = max(0, int(x1 - padding_x))
+                padded_y1 = max(0, int(y1 - padding_y))
+                padded_x2 = min(orig_width, int(x2 + padding_x))
+                padded_y2 = min(orig_height, int(y2 + padding_y))
+                
+                # Crop with padding
+                cropped = img_original.crop((padded_x1, padded_y1, padded_x2, padded_y2))
                 cropped_images.append({
                     "image": cropped,
                     "confidence": d['confidence'],
-                    "bbox": (int(x1), int(y1), int(x2), int(y2))
+                    "bbox": (padded_x1, padded_y1, padded_x2, padded_y2)  # Store padded bbox
                 })
         
         # Draw boxes on full page image (RED color)
@@ -718,7 +739,7 @@ def image_coords_to_pdf_coords(image_bbox, image_size, pdf_size, resolution):
     return (x1_pdf, y1_pdf, x2_pdf, y2_pdf)
 
 
-def extract_text_from_pdf_region(pdf_path: str, page_num: int, pdf_bbox, pdf_size) -> str:
+def extract_text_from_pdf_region(pdf_path: str, page_num: int, pdf_bbox, pdf_size, return_positions: bool = False):
     """
     Extract selectable text from a PDF region using PyMuPDF.
     
@@ -727,12 +748,16 @@ def extract_text_from_pdf_region(pdf_path: str, page_num: int, pdf_bbox, pdf_siz
         page_num: Page number (1-indexed)
         pdf_bbox: (x1, y1, x2, y2) in PDF coordinates (bottom-left origin)
         pdf_size: (width, height) in PDF points
+        return_positions: If True, also returns word positions for tag location tracking
     
     Returns:
-        Extracted text string, or empty string if no text or error
+        If return_positions=False: Extracted text string, or empty string if no text or error
+        If return_positions=True: Tuple of (text, word_positions, mupdf_rect) where:
+            - word_positions is list of (word, x, y) with PyMuPDF coordinates
+            - mupdf_rect is the actual clipping rect (for containment checks, same coord system as word positions)
     """
     if not PYMUPDF_AVAILABLE:
-            return ""
+            return ("", [], None) if return_positions else ""
 
     x1, y1, x2, y2 = pdf_bbox
     pdf_width, pdf_height = pdf_size
@@ -756,13 +781,32 @@ def extract_text_from_pdf_region(pdf_path: str, page_num: int, pdf_bbox, pdf_siz
         # Create a rectangle for the region
         rect = fitz.Rect(x1, y1_mupdf, x2, y2_mupdf)
         
+        # Store mupdf_rect for containment checking (same coordinate system as word positions)
+        mupdf_rect = (x1, y1_mupdf, x2, y2_mupdf)
+        
         # Extract text from rectangle
         text = page.get_text("text", clip=rect)
         
+        # Also get word positions if requested (for tag deduplication)
+        word_positions = []
+        if return_positions:
+            words = page.get_text("words", clip=rect)
+            # words format: (x0, y0, x1, y1, "word", block_no, line_no, word_no)
+            for w in words:
+                word_text = w[4]
+                # Use center of word bbox as position (in PyMuPDF coordinates)
+                word_x = (w[0] + w[2]) / 2
+                word_y = (w[1] + w[3]) / 2
+                word_positions.append((word_text, word_x, word_y))
+        
         doc.close()
+        if return_positions:
+            return (text.strip(), word_positions, mupdf_rect)
         return text.strip()
     except Exception as e:
         print(f"[PyMuPDF] Error extracting text: {e}")
+        if return_positions:
+            return ("", [], None)
         return ""
 
 
@@ -998,11 +1042,20 @@ def get_sheet_number(page, use_pymupdf: bool = False) -> str:
         w, h = x1 - x0, y1 - y0
         
         # Sheet number pattern: Letter(s) + digits, common formats
-        # A001, A-001, A.001, A001-A, EL-001, etc.
+        # A001, A-001, A.001, A001-A, EL-001, I-700, etc.
         sheet_pattern = re.compile(r'\b([A-Z]{1,4}[-.]?\d{2,4}(?:[-.]?[A-Z0-9]{1,2})?)\b', re.IGNORECASE)
         
         # Keywords that typically appear near sheet numbers in title blocks
         sheet_keywords = ['SHEET', 'SHT', 'DWG', 'DRAWING', 'NO.', 'NO:', 'NUMBER', '#', 'PAGE']
+        
+        # Pattern to find sheet number directly after keywords (most reliable)
+        # Handles both same-line and multi-line formats:
+        # Same line: "SHEET NO: I-700", "DWG NO. A-101"
+        # Multi-line: "DRAWING NO.\nI-700"
+        keyword_pattern = re.compile(
+            r'(?:SHEET|SHT|DWG|DRAWING)[\s]*(?:NO\.?|NUMBER|#)?[\s:\n]*([A-Z]{1,4}[-.]?\d{2,4}(?:[-.]?[A-Z0-9]{1,2})?)',
+            re.IGNORECASE | re.MULTILINE
+        )
         
         # Define regions to search (title blocks are usually in corners)
         # Format: (left_pct, top_pct, right_pct, bottom_pct, priority)
@@ -1042,6 +1095,17 @@ def get_sheet_number(page, use_pymupdf: bool = False) -> str:
                 
                 text_upper = text.upper()
                 
+                # FIRST: Try to find sheet number directly after keywords (most reliable)
+                keyword_matches = keyword_pattern.findall(text)
+                for match in keyword_matches:
+                    sheet = match.strip().upper()
+                    if len(sheet) >= 2 and len(sheet) <= 10:
+                        # Very high score for keyword-adjacent matches
+                        score = region_priority + 50
+                        if score > best_score:
+                            best_score = score
+                            best_match = sheet
+                
                 # Check if this region has sheet-related keywords
                 has_keyword = any(kw in text_upper for kw in sheet_keywords)
                 
@@ -1063,17 +1127,34 @@ def get_sheet_number(page, use_pymupdf: bool = False) -> str:
                         score += 20
                     
                     # Bonus for common sheet prefixes (A=Architectural, E=Electrical, etc.)
-                    if sheet[0] in 'AESMPCGLD':
+                    # I = Interior is also common
+                    if sheet[0] in 'AESMPCGLDI':
                         score += 10
                     
                     # Bonus if starts with letter and has 2-3 digits (most common format)
                     if re.match(r'^[A-Z]\d{2,3}$', sheet):
                         score += 15
                     
+                    # BIG bonus for sheet numbers ending in 00 or 01 (title sheets)
+                    # or round numbers like X-100, X-200, X-700, etc.
+                    if re.match(r'^[A-Z][-.]?\d{1,2}00$', sheet) or re.match(r'^[A-Z][-.]?\d{1,2}01$', sheet):
+                        score += 25
+                    
                     # Penalty for patterns that look like tags (e.g., PT-103 is likely a tag, not sheet)
                     if re.match(r'^[A-Z]{2,}_?[A-Z]*-?\d+$', sheet):
                         # This looks more like a material tag (PT-103, WC-12, etc.)
                         score -= 10
+                    
+                    # Penalty for drawing detail references (I-8XX, I-9XX patterns)
+                    # These are typically detail/section callouts, not sheet numbers
+                    if re.match(r'^[A-Z][-.]?[89]\d{2}$', sheet):
+                        score -= 30  # Big penalty - these are almost always detail refs
+                    
+                    # Penalty if sheet number appears multiple times in the region
+                    # (detail references repeat, actual sheet number usually appears once)
+                    count_in_text = text_upper.count(sheet)
+                    if count_in_text > 2:
+                        score -= 15  # Likely a repeated detail reference
                     
                     if score > best_score:
                         best_score = score
@@ -1341,6 +1422,10 @@ async def process_pdf_with_job(job: JobState):
             
             await job.broadcast({"type": "info", "total_pages": total})
             
+            # Store ALL region data across ALL pages for position-based deduplication
+            # This is CRITICAL - we search ALL regions for ALL target tags (same as test_tag_extraction.py)
+            all_regions_data = []
+            
             for idx, page_num in enumerate(range(job.start_page, min(job.end_page + 1, len(pdf_doc) + 1))):
                 job.current_page = page_num
                 
@@ -1505,6 +1590,8 @@ async def process_pdf_with_job(job: JobState):
                         
                         # Step 1: Try PyMuPDF first (fast PDF text extraction), then OCR fallback
                         text = ""
+                        word_positions = []  # Word positions for tag deduplication
+                        mupdf_rect = None  # MuPDF rect for containment checking (same coord system as word_positions)
                         is_ocr_text = False  # Track if text came from OCR
                         try:
                             # Try PyMuPDF extraction from PDF first
@@ -1530,11 +1617,12 @@ async def process_pdf_with_job(job: JobState):
                                 # Convert to PDF coordinates
                                 pdf_bbox = image_coords_to_pdf_coords(image_bbox, image_size, pdf_size, resolution)
                                 
-                                # Extract text using PyMuPDF
+                                # Extract text using PyMuPDF (with word positions for deduplication)
                                 def extract_pdf_text():
-                                    return extract_text_from_pdf_region(job.pdf_path, page_num, pdf_bbox, pdf_size)
+                                    return extract_text_from_pdf_region(job.pdf_path, page_num, pdf_bbox, pdf_size, return_positions=True)
                                 
-                                text = await asyncio.to_thread(extract_pdf_text)
+                                extraction_result = await asyncio.to_thread(extract_pdf_text)
+                                text, word_positions, mupdf_rect = extraction_result  # Unpack (text, word_positions, mupdf_rect)
                                 
                                 if text:
                                     print(f"[JOB-{job.job_id}] PyMuPDF extracted {len(text)} chars from PDF")
@@ -1545,20 +1633,32 @@ async def process_pdf_with_job(job: JobState):
                                     })
                                     is_ocr_text = False  # Text came from PyMuPDF (accurate)
                                 else:
-                                    print(f"[JOB-{job.job_id}] PyMuPDF: No selectable text found, falling back to OCR")
-                                    await job.broadcast({
-                                        "type": "log",
-                                        "level": "info",
-                                        "message": f"No PDF text found, using OCR..."
-                                    })
+                                    if ALWAYS_PYMUPDF:
+                                        print(f"[JOB-{job.job_id}] PyMuPDF: No selectable text found, but ALWAYS_PYMUPDF=True - skipping OCR")
+                                        await job.broadcast({
+                                            "type": "log",
+                                            "level": "warning",
+                                            "message": f"⚠️ No PDF text found in region (ALWAYS_PYMUPDF=True, OCR disabled)"
+                                        })
+                                    else:
+                                        print(f"[JOB-{job.job_id}] PyMuPDF: No selectable text found, falling back to OCR")
+                                        await job.broadcast({
+                                            "type": "log",
+                                            "level": "info",
+                                            "message": f"No PDF text found, using OCR..."
+                                        })
                             
-                            # Fallback to OCR if PyMuPDF didn't find text
-                            if not text:
+                            # Fallback to OCR if PyMuPDF didn't find text (only if ALWAYS_PYMUPDF is False)
+                            if not text and not ALWAYS_PYMUPDF:
                                 await job.broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
                                 print(f"[JOB-{job.job_id}] Starting OCR for drawing {i+1}")
                                 text = await asyncio.to_thread(ocr_image, cropped_img)
                                 print(f"[JOB-{job.job_id}] OCR complete: {len(text)} chars")
                                 is_ocr_text = True  # Text came from OCR (may have errors)
+                            elif not text and ALWAYS_PYMUPDF:
+                                # No text found and OCR is disabled - leave text empty
+                                is_ocr_text = False  # Mark as PyMuPDF (even though empty) to avoid OCR processing
+                                print(f"[JOB-{job.job_id}] No text found, OCR disabled (ALWAYS_PYMUPDF=True)")
                             
                             # Log raw text for debugging
                             if text:
@@ -1602,12 +1702,31 @@ async def process_pdf_with_job(job: JobState):
                              drawing_id, location_desc = "", ""
                              await job.broadcast({"type": "log", "level": "info", "message": f"No tags, skipping location extraction"})
 
+                        # Store region data for ALL regions (for position-based deduplication)
+                        # This is CRITICAL - we need to search ALL regions for ALL target tags
+                        # even if process_ocr_and_tags didn't find matches in this region
+                        all_regions_data.append({
+                            'drawing_index': i + 1,
+                            'word_positions': word_positions,
+                            'mupdf_rect': mupdf_rect,
+                            'sheet': sheet,
+                            'page': page_num,
+                            'location': location_desc,
+                            'drawing_id': drawing_id,
+                            'confidence': conf,
+                            'bbox': crop_data["bbox"]
+                        })
+
                         # Step 4: Update results with location and drawing index
                         # Tags are already deduplicated within each drawing (one tag per drawing)
+                        # Also add bbox and word_positions for position-based deduplication
                         for r in drawing_results:
                             r['location'] = location_desc
                             r['description'] = drawing_id # Use alphanumeric code as description
                             r['drawing_index'] = i + 1
+                            r['bbox'] = crop_data["bbox"]  # Store bbox for overlap detection
+                            r['word_positions'] = word_positions  # Store word positions for tag location
+                            r['mupdf_rect'] = mupdf_rect  # Store mupdf_rect for containment checking (same coord system as word_positions)
                             
                         # Process results including debug logs
                         valid_results = []
@@ -1693,27 +1812,185 @@ async def process_pdf_with_job(job: JobState):
                 # Small delay to allow GC to complete
                 await asyncio.sleep(0.1)
             
-            # Filter valid results ONLY
-            final_results = []
-            seen_in_final = set() # Deduplicate only truly identical entries
+            # ================================================================
+            # POSITION-BASED DEDUPLICATION + CONTAINMENT-BASED REGION ASSIGNMENT
+            # (Same approach as test_tag_extraction.py)
+            # ================================================================
+            # The key insight: when two drawing regions overlap, the same physical tag
+            # can be extracted from both regions. We:
+            # 1. Find all tag positions across all regions (one detection per position)
+            # 2. Deduplicate by position (tags within 30 PDF points are same)
+            # 3. Assign each unique tag to the region that CONTAINS it (using mupdf_rect)
+            # 4. Use distance to center as tiebreaker when multiple regions contain same tag
             
-            for r in results:
-                # 1. Skip debug objects
-                if r.get("_debug_ignored") or r.get("_debug_match"):
+            def find_all_tag_positions_cleaned(tag_text, word_positions):
+                """Find ALL positions of a tag in the word_positions list using CLEANED matching.
+                
+                Uses the same approach as test_tag_extraction.py: removes all non-alphanumeric
+                characters before comparison. This handles cases where PyMuPDF extracts tags
+                with different separator formats (e.g., em-dash vs hyphen, or different
+                underscore representations).
+                
+                Returns list of (x, y) in PyMuPDF coordinates."""
+                if not word_positions:
+                    return []
+                
+                positions = []
+                # Use clean_tag_text to remove all non-alphanumeric chars (same as test_tag_extraction.py)
+                # This converts "A_WB-7" to "AWB7" for comparison
+                tag_cleaned = clean_tag_text(tag_text)
+                
+                for word, x, y in word_positions:
+                    word_cleaned = clean_tag_text(word)
+                    # EXACT match on cleaned versions
+                    if word_cleaned == tag_cleaned:
+                        positions.append((x, y))
+                
+                return positions
+            
+            def positions_are_same(pos1, pos2, tolerance=30):
+                """Check if two positions are the same tag (within tolerance)."""
+                if pos1 is None or pos2 is None:
+                    return False
+                distance = ((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2) ** 0.5
+                return distance < tolerance
+            
+            def is_point_inside_bbox(point, bbox, tolerance=5):
+                """Check if a point is inside a bounding box (with small tolerance)."""
+                if point is None or bbox is None:
+                    return False
+                x, y = point
+                x1, y1, x2, y2 = bbox
+                
+                # Normalize bbox (ensure x1 < x2, y1 < y2)
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                
+                return (x1 - tolerance <= x <= x2 + tolerance and 
+                        y1 - tolerance <= y <= y2 + tolerance)
+            
+            def distance_to_region_center(tag_pos, region_bbox):
+                """Calculate distance from tag position to region center."""
+                if tag_pos is None or region_bbox is None:
+                    return float('inf')
+                tag_x, tag_y = tag_pos
+                x1, y1, x2, y2 = region_bbox
+                center_x = (x1 + x2) / 2
+                center_y = (y1 + y2) / 2
+                return ((tag_x - center_x) ** 2 + (tag_y - center_y) ** 2) ** 0.5
+            
+            # Step 1: Collect ALL tag detections - ONE DETECTION PER POSITION
+            # CRITICAL FIX: Search ALL regions for ALL target tags (same as test_tag_extraction.py)
+            # Don't rely on what process_ocr_and_tags found - search word_positions directly
+            all_detections = []  # List of {result, position, mupdf_rect, drawing_index}
+            
+            # For EACH region in all_regions_data, search for ALL target tags
+            # This is the key difference from before - we now search EVERY region
+            print(f"[JOB-{job.job_id}] Searching {len(all_regions_data)} regions for {len(target_tags)} target tags...")
+            
+            for region_data in all_regions_data:
+                word_positions = region_data['word_positions']
+                mupdf_rect = region_data['mupdf_rect']
+                drawing_idx = region_data['drawing_index']
+                
+                if not word_positions:
                     continue
                 
-                # 2. Strict validation - must have tag and sheet
-                if not r.get("tag") or not r.get("sheet"):
-                    continue
+                # Search for EACH target tag in this region's word_positions
+                for target_tag in target_tags:
+                    tag_positions = find_all_tag_positions_cleaned(target_tag, word_positions)
+                    
+                    # Create ONE detection per position found
+                    for pos in tag_positions:
+                        # Create a result object for this detection
+                        all_detections.append({
+                            'result': {
+                                'material_type': TAG_DESCRIPTIONS.get(target_tag, "Unknown"),
+                                'tag': target_tag,
+                                'sheet': region_data['sheet'],
+                                'page': region_data['page'],
+                                'description': region_data['drawing_id'],
+                                'location': region_data['location'],
+                                'confidence': f"{region_data['confidence']:.0%}",
+                                'drawing_index': drawing_idx
+                            },
+                            'position': pos,
+                            'mupdf_rect': mupdf_rect,
+                            'drawing_index': drawing_idx,
+                            'tag_key': (target_tag, region_data['sheet'], region_data['page'])
+                        })
+            
+            print(f"[JOB-{job.job_id}] Total raw detections (one per position): {len(all_detections)}")
+            
+            # Step 2: Group detections by unique position (within tolerance)
+            unique_positions = []  # List of {position, detections: [detection, ...]}
+            
+            for detection in all_detections:
+                pos = detection['position']
                 
-                # 3. Final Deduplication - include occurrence counter to allow multiple instances
-                # This allows the same tag to appear multiple times even in the same drawing
-                occurrence = r.get('occurrence', 1)
-                sig = f"{r['tag']}-{r['sheet']}-{r['page']}-{r.get('drawing_index', '0')}-{occurrence}"
-                if sig in seen_in_final:
-                    continue  # Already processed this specific occurrence
-                seen_in_final.add(sig)
-                final_results.append(r)
+                # Check if this position matches any existing unique position
+                found_match = False
+                for unique in unique_positions:
+                    if positions_are_same(pos, unique['position'], tolerance=30):
+                        unique['detections'].append(detection)
+                        found_match = True
+                        break
+                
+                if not found_match:
+                    unique_positions.append({
+                        'position': pos,
+                        'detections': [detection]
+                    })
+            
+            duplicates_removed = len(all_detections) - len(unique_positions)
+            print(f"[JOB-{job.job_id}] Unique positions after dedup: {len(unique_positions)}, duplicates: {duplicates_removed}")
+            
+            # Step 3: For each unique position, assign to the correct region based on containment
+            final_results = []
+            
+            for unique in unique_positions:
+                tag_pos = unique['position']
+                detections = unique['detections']
+                
+                if len(detections) == 1:
+                    # Only one detection - use it
+                    final_results.append(detections[0]['result'])
+                else:
+                    # Multiple detections at same position - need to pick the best one
+                    # Filter to regions that actually CONTAIN this position (using mupdf_rect)
+                    containing_detections = []
+                    for d in detections:
+                        if d['mupdf_rect'] and is_point_inside_bbox(tag_pos, d['mupdf_rect']):
+                            containing_detections.append(d)
+                    
+                    if len(containing_detections) == 0:
+                        # Edge case: position not inside any region's mupdf_rect
+                        # Fall back to first detection
+                        print(f"[JOB-{job.job_id}] WARNING: Tag at {tag_pos} not inside any mupdf_rect, using first detection")
+                        final_results.append(detections[0]['result'])
+                    elif len(containing_detections) == 1:
+                        # Only one region contains this position - use it
+                        final_results.append(containing_detections[0]['result'])
+                    else:
+                        # Multiple overlapping regions contain this position
+                        # Use distance to center as tiebreaker
+                        best_detection = containing_detections[0]
+                        min_distance = distance_to_region_center(tag_pos, best_detection['mupdf_rect'])
+                        
+                        for d in containing_detections[1:]:
+                            dist = distance_to_region_center(tag_pos, d['mupdf_rect'])
+                            if dist < min_distance:
+                                min_distance = dist
+                                best_detection = d
+                        
+                        print(f"[JOB-{job.job_id}] Tag at {tag_pos} in multiple regions, assigned to drawing {best_detection['drawing_index']}")
+                        final_results.append(best_detection['result'])
+            
+            # Log deduplication stats
+            print(f"[JOB-{job.job_id}] Position-based deduplication with containment complete")
+            print(f"[JOB-{job.job_id}] Final results: {len(final_results)} unique tag(s)")
             
             # Save results
             csv_path = os.path.join(RESULTS_FOLDER, "results.csv")
