@@ -2492,12 +2492,17 @@
                     break;
 
                 case 'page_start':
-                    document.getElementById('page-info').textContent = `Page ${data.page} (Sheet ${data.sheet})`;
+                    if (data.sheet && data.sheet !== 'N/A') {
+                        document.getElementById('page-info').textContent = `Page ${data.page} (Sheet ${data.sheet})`;
+                        addLog('info', `Processing page ${data.page} - Sheet ${data.sheet}`);
+                    } else {
+                        document.getElementById('page-info').textContent = `Page ${data.page}`;
+                        addLog('info', `Processing page ${data.page}`);
+                    }
                     const progress = (data.progress / data.total) * 100;
                     document.getElementById('progress-fill').style.width = progress + '%';
                     currentDrawings = [];
                     document.getElementById('drawings-container').innerHTML = '';
-                    addLog('info', `Processing page ${data.page} - Sheet ${data.sheet}`);
                     stats.pages++;
                     updateStats();
                     break;
