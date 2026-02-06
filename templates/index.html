@@ -2507,6 +2507,12 @@
                     updateStats();
                     break;
 
+                case 'sheet_update':
+                    // Update sheet name without incrementing page counter
+                    document.getElementById('page-info').textContent = `Page ${data.page} (Sheet ${data.sheet})`;
+                    addLog('success', `Sheet name: ${data.sheet}`);
+                    break;
+
                 case 'full_page':
                     // Use image URL instead of base64 (prevents connection drops)
                     document.getElementById('full-page-preview').innerHTML =
@@ -2620,15 +2626,18 @@
         function addLog(level, message) {
             const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
             const icons = { info: '→', success: '✓', warning: '⚠', error: '✗' };
-            const logHtml = `
-                <div class="log-entry">
-                    <span class="log-time">${time}</span>
-                    <span class="log-icon log-${level}">${icons[level] || '→'}</span>
-                    <span>${message}</span>
-                </div>
-            `;
-            document.getElementById('logs-container').innerHTML += logHtml;
-            document.getElementById('logs-container').scrollTop = document.getElementById('logs-container').scrollHeight;
+            const container = document.getElementById('logs-container');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">${time}</span><span class="log-icon log-${level}">${icons[level] || '→'}</span><span>${message}</span>`;
+            container.appendChild(entry);
+            
+            // Cap at 200 log entries to prevent memory bloat
+            while (container.children.length > 200) {
+                container.removeChild(container.firstChild);
+            }
+            
+            container.scrollTop = container.scrollHeight;
         }
 
         function showResults(results) {

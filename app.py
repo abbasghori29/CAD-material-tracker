@@ -1546,7 +1546,6 @@ async def process_pdf_with_job(job: JobState):
                 job.current_drawing_index = 0
                 
                 # Step 1: Render page to image first (fast operation)
-                await job.broadcast({"type": "log", "level": "info", "message": f"Rendering page {page_num}..."})
                 print(f"[JOB-{job.job_id}] Rendering page {page_num}")
                 try:
                     img_original, resolution = await asyncio.to_thread(
@@ -1583,7 +1582,6 @@ async def process_pdf_with_job(job: JobState):
                 
                 # Step 3: Now detect drawings using Roboflow (this takes time)
                 if img_original and resolution:
-                    await job.broadcast({"type": "log", "level": "info", "message": f"Detecting drawings on page {page_num}..."})
                     print(f"[JOB-{job.job_id}] Starting detection for page {page_num}")
                     try:
                         img_annotated, cropped_drawings, drawing_data = await asyncio.to_thread(
@@ -1664,12 +1662,6 @@ async def process_pdf_with_job(job: JobState):
                             "bbox": crop_data["bbox"]
                         })
                         
-                        await job.broadcast({
-                            "type": "log",
-                            "level": "info",
-                            "message": f"Analyzing drawing {i + 1}/{num_drawings}..."
-                        })
-                        
                         # Step 1: Try PyMuPDF first (fast PDF text extraction), then OCR fallback
                         text = ""
                         word_positions = []  # Word positions for tag deduplication
@@ -1678,8 +1670,6 @@ async def process_pdf_with_job(job: JobState):
                         try:
                             # Try PyMuPDF extraction from PDF first
                             if PYMUPDF_AVAILABLE and img_original and resolution:
-                                await job.broadcast({"type": "log", "level": "info", "message": f"Extracting text from PDF..."})
-                                
                                 # Get PDF size (use resolution we already calculated from render)
                                 # Handle both PyMuPDF and pdfplumber page objects
                                 if use_pymupdf and PYMUPDF_AVAILABLE:
@@ -1708,31 +1698,15 @@ async def process_pdf_with_job(job: JobState):
                                 
                                 if text:
                                     print(f"[JOB-{job.job_id}] PyMuPDF extracted {len(text)} chars from PDF")
-                                    await job.broadcast({
-                                        "type": "log",
-                                        "level": "info",
-                                        "message": f"✅ Extracted {len(text)} chars from PDF text"
-                                    })
                                     is_ocr_text = False  # Text came from PyMuPDF (accurate)
                                 else:
                                     if ALWAYS_PYMUPDF:
-                                        print(f"[JOB-{job.job_id}] PyMuPDF: No selectable text found, but ALWAYS_PYMUPDF=True - skipping OCR")
-                                        await job.broadcast({
-                                            "type": "log",
-                                            "level": "warning",
-                                            "message": f"⚠️ No PDF text found in region (ALWAYS_PYMUPDF=True, OCR disabled)"
-                                        })
+                                        print(f"[JOB-{job.job_id}] PyMuPDF: No selectable text found, ALWAYS_PYMUPDF=True - skipping OCR")
                                     else:
                                         print(f"[JOB-{job.job_id}] PyMuPDF: No selectable text found, falling back to OCR")
-                                        await job.broadcast({
-                                            "type": "log",
-                                            "level": "info",
-                                            "message": f"No PDF text found, using OCR..."
-                                        })
                             
                             # Fallback to OCR if PyMuPDF didn't find text (only if ALWAYS_PYMUPDF is False)
                             if not text and not ALWAYS_PYMUPDF:
-                                await job.broadcast({"type": "log", "level": "info", "message": f"Running OCR..."})
                                 print(f"[JOB-{job.job_id}] Starting OCR for drawing {i+1}")
                                 text = await asyncio.to_thread(ocr_image, cropped_img)
                                 print(f"[JOB-{job.job_id}] OCR complete: {len(text)} chars")
@@ -1741,15 +1715,6 @@ async def process_pdf_with_job(job: JobState):
                                 # No text found and OCR is disabled - leave text empty
                                 is_ocr_text = False  # Mark as PyMuPDF (even though empty) to avoid OCR processing
                                 print(f"[JOB-{job.job_id}] No text found, OCR disabled (ALWAYS_PYMUPDF=True)")
-                            
-                            # Log raw text for debugging
-                            if text:
-                                cleaned_snippet = text.replace('\n', ' ')[:100]
-                                await job.broadcast({
-                                    "type": "log",
-                                    "level": "info", 
-                                    "message": f"RAW TEXT OUT: {cleaned_snippet}..."
-                                })
 
                         except Exception as e:
                             print(f"[JOB-{job.job_id}] Text extraction ERROR: {type(e).__name__}: {e}")
@@ -1775,17 +1740,14 @@ async def process_pdf_with_job(job: JobState):
                         
                         if valid_tags_exist and OPENAI_AVAILABLE:
                             try:
-                                await job.broadcast({"type": "log", "level": "info", "message": f"Tags found! Extracting location..."})
                                 print(f"[JOB-{job.job_id}] Starting OpenAI call for drawing {i+1}")
                                 drawing_id, location_desc = await asyncio.to_thread(extract_location_description, cropped_img)
                                 print(f"[JOB-{job.job_id}] OpenAI call complete: ID={drawing_id}, LOC={location_desc[:30]}")
                             except Exception as e:
                                 print(f"[JOB-{job.job_id}] OpenAI ERROR: {type(e).__name__}: {e}")
                                 drawing_id, location_desc = "", ""
-                                await job.broadcast({"type": "log", "level": "warning", "message": f"Location extraction failed"})
                         elif not valid_tags_exist:
                              drawing_id, location_desc = "", ""
-                             await job.broadcast({"type": "log", "level": "info", "message": f"No tags, skipping location extraction"})
 
                         # Store region data for ALL regions (for position-based deduplication)
                         # This is CRITICAL - we need to search ALL regions for ALL target tags
@@ -1813,26 +1775,17 @@ async def process_pdf_with_job(job: JobState):
                             r['word_positions'] = word_positions  # Store word positions for tag location
                             r['mupdf_rect'] = mupdf_rect  # Store mupdf_rect for containment checking (same coord system as word_positions)
                             
-                        # Process results including debug logs
+                        # Process results - collect valid tags for clean summary
                         valid_results = []
+                        found_tag_names = []
                         for result in drawing_results:
                             if result.get("_debug_ignored"):
-                                # This is a debug message for ignored tags
-                                await job.broadcast({
-                                    "type": "log", 
-                                    "level": "warning", 
-                                    "message": f"🔍 OCR saw '{result['tag']}' but matched none of {len(target_tags)} tags (OCR: '{result['ocr_text']}')"
-                                })
+                                # Debug: OCR saw something but no match - server log only
+                                print(f"[JOB-{job.job_id}] OCR saw '{result['tag']}' but matched none of {len(target_tags)} tags")
                             elif result.get("_debug_match"):
-                                # This is a successful match debug info
-                                # Remove the internal flag before adding
                                 del result["_debug_match"]
                                 valid_results.append(result)
-                                await job.broadcast({
-                                    "type": "log", 
-                                    "level": "success", 
-                                    "message": f"✅ MATCHED: {result['tag']} in drawing {i+1} (Page {page_num})"
-                                })
+                                found_tag_names.append(result['tag'])
                                 
                                 # Send structured event for UI update
                                 await job.broadcast({
@@ -1844,16 +1797,18 @@ async def process_pdf_with_job(job: JobState):
                                 })
                             else:
                                 valid_results.append(result)
+                                if result.get('tag'):
+                                    found_tag_names.append(result['tag'])
+                        
+                        # Send ONE clean log per drawing
+                        if found_tag_names:
+                            tags_str = ", ".join(found_tag_names)
+                            await job.broadcast({"type": "log", "level": "success", "message": f"Drawing {i+1}: Found tags ({tags_str})"})
+                        else:
+                            await job.broadcast({"type": "log", "level": "info", "message": f"Drawing {i+1}: No tags"})
                         
                         if valid_results:
                             job.results.extend(valid_results)
-                            
-                        if location_desc:
-                            await job.broadcast({
-                                "type": "log",
-                                "level": "success",
-                                "message": f"Drawing {i + 1} → {location_desc}"
-                            })
                         
                         # Send OCR result with location
                         await job.broadcast({
@@ -1873,37 +1828,22 @@ async def process_pdf_with_job(job: JobState):
                     # ================================================================
                     if page_has_valid_tags and OPENAI_AVAILABLE and img_original:
                         try:
-                            # Explicit log so we can verify that OpenAI is actually being used for sheet names
-                            await job.broadcast({
-                                "type": "log",
-                                "level": "info",
-                                "message": f"USING OPENAI for sheet name on page {page_num} (regex only as fallback)"
-                            })
-                            await job.broadcast({
-                                "type": "log",
-                                "level": "info",
-                                "message": f"Tags found on page {page_num}! Extracting sheet name..."
-                            })
-                            print(f"[JOB-{job.job_id}] Extracting sheet name via OpenAI for page {page_num}")
-                            
+                            print(f"[JOB-{job.job_id}] USING OPENAI for sheet name on page {page_num}")
                             openai_sheet = await asyncio.to_thread(extract_sheet_name_openai, img_original)
                             
                             if openai_sheet:
                                 sheet = openai_sheet
                                 print(f"[JOB-{job.job_id}] OpenAI sheet name for page {page_num}: {sheet}")
-                                await job.broadcast({"type": "log", "level": "success", "message": f"Sheet name: {sheet}"})
                             else:
                                 # OpenAI returned empty - fall back to regex extraction
                                 print(f"[JOB-{job.job_id}] OpenAI couldn't extract sheet name, falling back to regex")
                                 sheet = await asyncio.to_thread(get_sheet_number, page, use_pymupdf)
                                 print(f"[JOB-{job.job_id}] Regex fallback sheet name: {sheet}")
-                                await job.broadcast({"type": "log", "level": "warning", "message": f"AI couldn't find sheet name, regex fallback: {sheet}"})
                         except Exception as e:
                             # OpenAI failed - fall back to regex extraction
                             print(f"[JOB-{job.job_id}] Sheet name extraction ERROR: {type(e).__name__}: {e}")
                             sheet = await asyncio.to_thread(get_sheet_number, page, use_pymupdf)
                             print(f"[JOB-{job.job_id}] Regex fallback sheet name: {sheet}")
-                            await job.broadcast({"type": "log", "level": "warning", "message": f"AI sheet extraction failed, regex fallback: {sheet}"})
                     elif page_has_valid_tags and not OPENAI_AVAILABLE:
                         # OpenAI not available at all - fall back to regex
                         print(f"[JOB-{job.job_id}] OpenAI not available, falling back to regex")
@@ -1919,26 +1859,12 @@ async def process_pdf_with_job(job: JobState):
                         if page_num in job.processed_pages:
                             job.processed_pages[page_num]['sheet'] = sheet
                         
-                        # Send sheet name update to UI
+                        # Send sheet name update to UI (separate event to avoid incrementing page counter)
                         await job.broadcast({
-                            "type": "page_start",
+                            "type": "sheet_update",
                             "page": page_num,
-                            "sheet": sheet,
-                            "progress": idx + 1,
-                            "total": total
+                            "sheet": sheet
                         })
-                    
-                    await job.broadcast({
-                        "type": "log",
-                        "level": "success",
-                        "message": f"Page {page_num} complete - {num_drawings} drawings processed"
-                    })
-                else:
-                    await job.broadcast({
-                        "type": "log",
-                        "level": "warning",
-                        "message": f"No drawings detected on page {page_num}"
-                    })
                 
                 # CRITICAL: Release memory after each page to prevent OOM
                 del page
