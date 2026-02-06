@@ -261,6 +261,12 @@ class DrawingLocationInfo(BaseModel):
         description="The location identifier/description found in the drawing title block or header. Examples: 'E1 1/8 RCP - LEVEL 3 PART B', 'C3 KITCHEN E1 ELEVATION 2', 'B1 SECTION AT EAST OF GARAGE - NS'. Return empty string if not found."
     )
 
+class SheetNameInfo(BaseModel):
+    """Extracted sheet name/number from a CAD drawing page."""
+    sheet_name: str = Field(
+        description="The sheet number/name found in the title block. Examples: 'A-101', 'I-700', 'E-201', 'A2.01', 'S-301.1', 'M-100'. Return empty string if not found."
+    )
+
 # Shared prompt for location extraction
 LOCATION_EXTRACTION_PROMPT = """Extract the drawing identifier and title/location from this CAD drawing image.
 
@@ -929,6 +935,81 @@ def extract_location_description(img: Image.Image) -> tuple:
         return "", ""  # Return empty on any error - don't block processing
 
 
+# Sheet name extraction prompt
+SHEET_NAME_EXTRACTION_PROMPT = """You are analyzing a CAD/architectural drawing page to extract the SHEET NUMBER from the title block.
+
+IMPORTANT RULES:
+1. Look ONLY at the TITLE BLOCK area (usually in the bottom-right corner of the page, sometimes bottom-center or right edge).
+2. The sheet number is a SHORT alphanumeric code that identifies this specific page in the drawing set.
+3. Common sheet number formats:
+   - Letter prefix + digits: A-101, E-201, S-301, M-100, I-700, P-401
+   - With dots: A2.01, A1.1, S3.02
+   - With dashes: A-101, I-700, E-201.1
+   - Multi-letter prefix: EL-001, ID-202, IN-210, AD-100
+   - Simple: A001, E200, S100
+4. The sheet number is typically labeled near keywords like "SHEET", "SHT", "DWG NO", "DRAWING NO", "NO.", or "PAGE".
+5. Do NOT confuse the sheet number with:
+   - Drawing detail references (small numbers in circles like '1', '2', 'A')
+   - Material tags (BR-1, FCL-2, MC-1 etc.)
+   - Scale notations (1/4" = 1'-0")
+   - Revision numbers (REV 1, R2)
+   - Project numbers (long numbers like 12345 or dates)
+6. Return ONLY the sheet number/name. Return empty string if you cannot confidently identify one.
+7. The sheet number is usually one of the most prominent pieces of text in the title block."""
+
+
+def extract_sheet_name_openai(img: Image.Image) -> str:
+    """Extract sheet name/number from a CAD drawing page using OpenAI Vision.
+    
+    Only call this when desired tags have been found on the page.
+    Sends the full page image to identify the sheet number from the title block.
+    
+    Args:
+        img: Full page image (PIL Image)
+    
+    Returns:
+        str: Extracted sheet name, or empty string if not found
+    """
+    if not OPENAI_AVAILABLE or VISION_LLM is None:
+        return ""
+    
+    try:
+        # Resize for cost efficiency (sheet name is large text, doesn't need high res)
+        page_img = img.copy()
+        if page_img.width > 1600 or page_img.height > 1600:
+            page_img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        
+        # Convert image to base64
+        buffered = BytesIO()
+        if page_img.mode != 'RGB':
+            page_img = page_img.convert('RGB')
+        page_img.save(buffered, format='JPEG', quality=80)
+        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        
+        structured_llm = VISION_LLM.with_structured_output(SheetNameInfo)
+        
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": SHEET_NAME_EXTRACTION_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+            ]
+        )
+        
+        result = structured_llm.invoke([message])
+        sheet_name = result.sheet_name.strip() if result.sheet_name else ""
+        
+        if sheet_name:
+            print(f"[OpenAI] Sheet name extracted: {sheet_name}")
+        else:
+            print(f"[OpenAI] Sheet name: not found in image")
+        
+        return sheet_name
+        
+    except Exception as e:
+        print(f"[OpenAI] Sheet name extraction error: {type(e).__name__}: {e}")
+        return ""  # Return empty on any error - don't block processing
+
+
 class BatchLocationInfo(BaseModel):
     """Batch extraction of locations from multiple drawings."""
     locations: List[str] = Field(
@@ -1434,17 +1515,17 @@ async def process_pdf_with_job(job: JobState):
                 
                 print(f"[JOB-{job.job_id}] Starting page {page_num} (subscribers: {len(job.subscribers)})")
                 
-                # Get page AND sheet number in thread (both can block)
-                def get_page_and_sheet():
+                # Get page (sheet name will be extracted via OpenAI later, only if tags found)
+                def get_page():
                     if use_pymupdf:
                         page = pdf_doc[page_num - 1]  # PyMuPDF uses 0-indexed
                     else:
                         page = pdf_doc.pages[page_num - 1]  # pdfplumber
-                    sheet = get_sheet_number(page, use_pymupdf=use_pymupdf)
-                    return page, sheet
+                    return page
                 
-                page, sheet = await asyncio.to_thread(get_page_and_sheet)
-                print(f"[JOB-{job.job_id}] Page {page_num} loaded, sheet: {sheet}")
+                page = await asyncio.to_thread(get_page)
+                sheet = "N/A"  # Will be extracted via OpenAI only when desired tags are found
+                print(f"[JOB-{job.job_id}] Page {page_num} loaded")
                 
                 # Send page start
                 await job.broadcast({
@@ -1545,6 +1626,7 @@ async def process_pdf_with_job(job: JobState):
                 
                 if cropped_drawings:
                     num_drawings = len(cropped_drawings)
+                    page_has_valid_tags = False  # Track if ANY drawing on this page has desired tags
                     
                     # Process each drawing ONE BY ONE - NO PARALLEL
                     for i, crop_data in enumerate(cropped_drawings):
@@ -1688,6 +1770,9 @@ async def process_pdf_with_job(job: JobState):
                         # Step 3: Run OpenAI ONLY if tags found
                         valid_tags_exist = any(not r.get("_debug_ignored") for r in drawing_results)
                         
+                        if valid_tags_exist:
+                            page_has_valid_tags = True  # Mark page as having desired tags
+                        
                         if valid_tags_exist and OPENAI_AVAILABLE:
                             try:
                                 await job.broadcast({"type": "log", "level": "info", "message": f"Tags found! Extracting location..."})
@@ -1782,6 +1867,66 @@ async def process_pdf_with_job(job: JobState):
                         # Add to results
                         results.extend(drawing_results)
                         job.results = results  # Update job state
+                    
+                    # ================================================================
+                    # SHEET NAME EXTRACTION VIA OPENAI (only when desired tags found)
+                    # ================================================================
+                    if page_has_valid_tags and OPENAI_AVAILABLE and img_original:
+                        try:
+                            # Explicit log so we can verify that OpenAI is actually being used for sheet names
+                            await job.broadcast({
+                                "type": "log",
+                                "level": "info",
+                                "message": f"USING OPENAI for sheet name on page {page_num} (regex only as fallback)"
+                            })
+                            await job.broadcast({
+                                "type": "log",
+                                "level": "info",
+                                "message": f"Tags found on page {page_num}! Extracting sheet name..."
+                            })
+                            print(f"[JOB-{job.job_id}] Extracting sheet name via OpenAI for page {page_num}")
+                            
+                            openai_sheet = await asyncio.to_thread(extract_sheet_name_openai, img_original)
+                            
+                            if openai_sheet:
+                                sheet = openai_sheet
+                                print(f"[JOB-{job.job_id}] OpenAI sheet name for page {page_num}: {sheet}")
+                                await job.broadcast({"type": "log", "level": "success", "message": f"Sheet name: {sheet}"})
+                            else:
+                                # OpenAI returned empty - fall back to regex extraction
+                                print(f"[JOB-{job.job_id}] OpenAI couldn't extract sheet name, falling back to regex")
+                                sheet = await asyncio.to_thread(get_sheet_number, page, use_pymupdf)
+                                print(f"[JOB-{job.job_id}] Regex fallback sheet name: {sheet}")
+                                await job.broadcast({"type": "log", "level": "warning", "message": f"AI couldn't find sheet name, regex fallback: {sheet}"})
+                        except Exception as e:
+                            # OpenAI failed - fall back to regex extraction
+                            print(f"[JOB-{job.job_id}] Sheet name extraction ERROR: {type(e).__name__}: {e}")
+                            sheet = await asyncio.to_thread(get_sheet_number, page, use_pymupdf)
+                            print(f"[JOB-{job.job_id}] Regex fallback sheet name: {sheet}")
+                            await job.broadcast({"type": "log", "level": "warning", "message": f"AI sheet extraction failed, regex fallback: {sheet}"})
+                    elif page_has_valid_tags and not OPENAI_AVAILABLE:
+                        # OpenAI not available at all - fall back to regex
+                        print(f"[JOB-{job.job_id}] OpenAI not available, falling back to regex")
+                        sheet = await asyncio.to_thread(get_sheet_number, page, use_pymupdf)
+                        print(f"[JOB-{job.job_id}] Regex fallback sheet name: {sheet}")
+                    
+                    # Update all data with the final sheet name (whether from OpenAI or regex fallback)
+                    if page_has_valid_tags and sheet != "N/A":
+                        for region in all_regions_data:
+                            if region['page'] == page_num:
+                                region['sheet'] = sheet
+                        
+                        if page_num in job.processed_pages:
+                            job.processed_pages[page_num]['sheet'] = sheet
+                        
+                        # Send sheet name update to UI
+                        await job.broadcast({
+                            "type": "page_start",
+                            "page": page_num,
+                            "sheet": sheet,
+                            "progress": idx + 1,
+                            "total": total
+                        })
                     
                     await job.broadcast({
                         "type": "log",
