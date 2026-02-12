@@ -58,6 +58,36 @@ export default function UploadPanel({ onStartProcessing, onTagsUploaded }: Uploa
         return token ? { Authorization: `Bearer ${token}` } : {};
     };
 
+    const uploadWithProgress = (
+        url: string,
+        formData: FormData,
+        onProgress: (percent: number) => void
+    ): Promise<{ ok: boolean; data: Record<string, unknown> }> => {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', url);
+            const headers = authHeaders();
+            Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    onProgress(Math.round((e.loaded / e.total) * 100));
+                }
+            };
+
+            xhr.onload = () => {
+                try {
+                    const data = (xhr.responseText ? JSON.parse(xhr.responseText) : {}) as Record<string, unknown>;
+                    resolve({ ok: xhr.status >= 200 && xhr.status < 300, data });
+                } catch {
+                    reject(new Error('Invalid response'));
+                }
+            };
+            xhr.onerror = () => reject(new Error('Network error'));
+            xhr.send(formData);
+        });
+    };
+
     const uploadTags = async (file: File) => {
         setErrorMessage(null);
         setModalTitle("Uploading Tag List");
@@ -65,42 +95,31 @@ export default function UploadPanel({ onStartProcessing, onTagsUploaded }: Uploa
         setUploadProgress(0);
         setModalOpen(true);
 
-        // Simulate progress
-        const interval = setInterval(() => {
-            setUploadProgress(prev => Math.min(prev + Math.random() * 20, 90));
-        }, 200);
-
         const formData = new FormData();
         formData.append('file', file);
-
-        // In dev, target port 8000
         const apiUrl = getApiUrl();
 
         try {
-            const res = await fetch(`${apiUrl}/upload-tags`, {
-                method: 'POST',
-                body: formData,
-                headers: authHeaders(),
-            });
-            const data = await res.json();
-
-            clearInterval(interval);
+            const { ok, data } = await uploadWithProgress(
+                `${apiUrl}/upload-tags`,
+                formData,
+                setUploadProgress
+            );
             setUploadProgress(100);
 
-            if (data.success) {
+            if (ok && data.success) {
                 setTagsFile(file);
-                setTagsCount(data.count);
+                setTagsCount((data.count as number) ?? 0);
                 onTagsUploaded();
                 setTimeout(() => {
                     setModalOpen(false);
                     setSlide(2);
                 }, 500);
             } else {
-                setErrorMessage(data.error || 'Tag list upload failed');
+                setErrorMessage((data.error as string) || 'Tag list upload failed');
                 setModalOpen(false);
             }
         } catch (err) {
-            clearInterval(interval);
             console.error(err);
             setErrorMessage('Tag list upload failed. Please try again.');
             setModalOpen(false);
@@ -127,40 +146,31 @@ export default function UploadPanel({ onStartProcessing, onTagsUploaded }: Uploa
         setUploadProgress(0);
         setModalOpen(true);
 
-        const interval = setInterval(() => {
-            setUploadProgress(prev => Math.min(prev + Math.random() * 10, 85));
-        }, 200);
-
         const formData = new FormData();
         formData.append('file', file);
-
         const apiUrl = getApiUrl();
 
         try {
-            const res = await fetch(`${apiUrl}/upload`, {
-                method: 'POST',
-                body: formData,
-                headers: authHeaders(),
-            });
-            const data = await res.json();
-
-            clearInterval(interval);
+            const { ok, data } = await uploadWithProgress(
+                `${apiUrl}/upload`,
+                formData,
+                setUploadProgress
+            );
             setUploadProgress(100);
 
-            if (res.ok && data.path) {
+            if (ok && data.path) {
                 setPdfFile(file);
-                setPdfPages(data.pages);
-                setUploadedPdfPath(data.path);
+                setPdfPages((data.pages as number) ?? 0);
+                setUploadedPdfPath(data.path as string);
 
                 setTimeout(() => {
                     setModalOpen(false);
                 }, 500);
             } else {
-                setErrorMessage(data.error || 'PDF upload failed');
+                setErrorMessage((data.error as string) || 'PDF upload failed');
                 setModalOpen(false);
             }
         } catch (err) {
-            clearInterval(interval);
             console.error(err);
             setErrorMessage('PDF upload failed. Please try again.');
             setModalOpen(false);

@@ -26,6 +26,10 @@ export default function Modal({ isOpen, title, filename, progress }: ModalProps)
                 <div className="text-[0.85rem] text-[#8b949e] mb-4">{filename}</div>
 
                 <div className="w-full mt-5">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="text-xs text-[#8b949e]">Upload progress</span>
+                        <span className="text-sm font-medium text-[#00D4FF] tabular-nums">{progress}%</span>
+                    </div>
                     <div className="w-full h-1 bg-[#1a2332] rounded-sm overflow-hidden">
                         <div
                             className="h-full bg-gradient-to-r from-[#00D4FF] via-[#818CF8] to-[#00D4FF] bg-[length:200%_100%] rounded-sm transition-all duration-300 ease-out shadow-[0_0_10px_rgba(0,212,255,0.4)] animate-[progress-shimmer_2s_linear_infinite]"
