@@ -53,7 +53,7 @@ export default function UploadPanel({ onStartProcessing, onTagsUploaded }: Uploa
             : '';
     };
 
-    const authHeaders = () => {
+    const authHeaders = (): Record<string, string> => {
         const token = localStorage.getItem('ab_builders_token');
         return token ? { Authorization: `Bearer ${token}` } : {};
     };
