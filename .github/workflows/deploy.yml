@@ -409,22 +409,15 @@ jobs:
               sudo systemctl start docker
             fi
             
-            # Install standalone docker-compose (older Docker on AL2023 has no "docker compose" plugin)
-            if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
-              echo "🐳 Installing docker-compose standalone..."
-              sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-              sudo chmod +x /usr/local/bin/docker-compose
-            fi
-            
-            echo "🐳 Building and running frontend (Docker)..."
+            # Build and run frontend with plain docker (no compose/buildx required)
+            echo "🐳 Building frontend image..."
             cd /home/ec2-user/cad-material-tracker
-            if docker compose version &> /dev/null; then
-              sudo docker compose build --no-cache frontend
-              sudo docker compose up -d frontend
-            else
-              sudo docker-compose build --no-cache frontend
-              sudo docker-compose up -d frontend
-            fi
+            sudo docker build -t absolute-builders-frontend --no-cache -f frontend/Dockerfile frontend
+            echo "🐳 Stopping old container (if any)..."
+            sudo docker stop absolute-builders-frontend 2>/dev/null || true
+            sudo docker rm absolute-builders-frontend 2>/dev/null || true
+            echo "🐳 Starting frontend container..."
+            sudo docker run -d --name absolute-builders-frontend -p 127.0.0.1:3000:3000 --restart unless-stopped absolute-builders-frontend
             
             # Restart Nginx to pick up config (frontend + backend upstreams)
             sudo nginx -t && sudo systemctl restart nginx
