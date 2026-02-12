@@ -1,10 +1,31 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { FileSpreadsheet, FileUp, ListOrdered, Download, ArrowRight, BookOpen } from 'lucide-react';
 
 export default function DocsPage() {
+    const router = useRouter();
+    const [authReady, setAuthReady] = useState(false);
+
+    useEffect(() => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('ab_builders_token') : null;
+        if (!token) {
+            router.replace('/login');
+            return;
+        }
+        setAuthReady(true);
+    }, [router]);
+
+    if (!authReady) {
+        return (
+            <main className="min-h-screen bg-[#0a0e17] flex items-center justify-center">
+                <div className="w-8 h-8 border-2 border-[#00D4FF] border-t-transparent rounded-full animate-spin" />
+            </main>
+        );
+    }
+
     return (
         <main className="min-h-screen bg-[#0a0e17] text-[#f0f6fc]">
             {/* Background */}
