@@ -5,7 +5,7 @@ CAD Material Tracker: upload tag lists and PDF drawings, run AI-powered extracti
 ## Stack
 
 - **Backend:** FastAPI (Python 3.12), Postgres (Supabase), JWT auth, WebSocket for live progress
-- **Frontend:** Next.js 16, React 19, Tailwind CSS
+- **Frontend:** Next.js 16 (ported to Next.js), React 19, Tailwind CSS
 - **Deploy:** Backend on EC2 via systemd; frontend in Docker; Nginx as single entry (only port 80 exposed)
 
 ---
@@ -130,7 +130,7 @@ After deploy, the app is at `http://<EC2_HOST>`.
 
 ## Security
 
-- Auth: JWT, PBKDF2-SHA256 passwords, protected routes and WebSocket.
+- Auth: JWT, protected routes and WebSocket.
 - CORS: Controlled via `ALLOWED_ORIGINS` in production.
 - Uploads: Filenames sanitized; WebSocket `pdf_path` validated to stay under upload dir.
 - See `SECURITY.md` for a production checklist (HTTPS, JWT secret, rate limiting, etc.).
