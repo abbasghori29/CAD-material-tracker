@@ -1,0 +1,451 @@
+# CI/CD Pipeline for CAD Material Tracker
+# Only frontend is exposed (Nginx). Backend runs on localhost via systemd; Nginx proxies API/WS to it.
+# Frontend: Docker. Backend: systemd (persistent).
+# Required GitHub Secrets: EC2_HOST, EC2_SSH_KEY, DATABASE_URL, JWT_SECRET_KEY, ROBOFLOW_API_KEY, ROBOFLOW_MODEL_ID, OPENAI_API_KEY, LLAMA_PARSE_API_KEY
+
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  APP_NAME: cad-material-tracker
+  APP_DIR: /home/ec2-user/cad-material-tracker
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup and Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          command_timeout: 60m
+          script: |
+            set -e
+            
+            echo "🚀 Starting deployment..."
+            
+            # ========================================
+            # SYSTEM CONFIGURATION (Large file support)
+            # ========================================
+            
+            echo "⚙️ Configuring system for large file uploads..."
+            
+            # Kernel network buffers for large uploads
+            if ! grep -q "net.core.rmem_max" /etc/sysctl.conf; then
+              sudo tee -a /etc/sysctl.conf > /dev/null << 'SYSCTL'
+            net.core.rmem_max = 134217728
+            net.core.wmem_max = 134217728
+            net.ipv4.tcp_rmem = 4096 87380 134217728
+            net.ipv4.tcp_wmem = 4096 65536 134217728
+            net.ipv4.tcp_keepalive_time = 600
+            net.ipv4.tcp_keepalive_intvl = 60
+            net.ipv4.tcp_keepalive_probes = 10
+            fs.file-max = 65535
+            SYSCTL
+              sudo sysctl -p || true
+            fi
+            
+            # Add swap space (8GB) to prevent OOM on large PDFs
+            if [ ! -f /swapfile ]; then
+              echo "💾 Creating 8GB swap space..."
+              sudo dd if=/dev/zero of=/swapfile bs=1M count=8192 status=progress
+              sudo chmod 600 /swapfile
+              sudo mkswap /swapfile
+              sudo swapon /swapfile
+              echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+              echo "✅ Swap enabled"
+            else
+              sudo swapon /swapfile 2>/dev/null || true
+            fi
+            
+            # ========================================
+            # INSTALL DEPENDENCIES
+            # ========================================
+            
+            # Install Python 3.12
+            if ! command -v python3.12 &> /dev/null; then
+              echo "📦 Installing Python 3.12..."
+              sudo dnf install -y python3.12 python3.12-pip python3.12-devel
+            fi
+            
+            # Install Git
+            if ! command -v git &> /dev/null; then
+              echo "📂 Installing Git..."
+              sudo dnf install -y git
+            fi
+            
+            # Install OpenCV dependencies (libGL fix)
+            echo "📦 Installing OpenCV dependencies..."
+            sudo dnf install -y mesa-libGL mesa-libGL-devel libglvnd-glx || true
+            
+            # Install font libraries for PyMuPDF text extraction
+            echo "🔤 Installing font libraries for PyMuPDF..."
+            sudo dnf install -y liberation-fonts dejavu-fonts-all fontconfig || true
+            sudo fc-cache -fv || true
+            echo "✅ Font libraries installed"
+            
+            # ========================================
+            # TESSERACT OCR (Build from source for Amazon Linux 2023)
+            # ========================================
+            
+            if ! command -v tesseract &> /dev/null; then
+              echo "📝 Installing Tesseract OCR from source..."
+              
+              # Install build dependencies
+              sudo dnf groupinstall -y "Development Tools" || true
+              sudo dnf install -y autoconf automake libtool wget libjpeg-turbo-devel libpng-devel libtiff-devel zlib-devel giflib-devel freetype-devel || true
+              
+              # Install Leptonica (required by Tesseract)
+              cd /tmp
+              if [ ! -f /usr/local/lib/liblept.so ]; then
+                echo "📦 Building Leptonica..."
+                wget -q http://www.leptonica.org/source/leptonica-1.82.0.tar.gz || true
+                tar -xzf leptonica-1.82.0.tar.gz || true
+                cd leptonica-1.82.0
+                ./configure --quiet
+                make -j$(nproc)
+                sudo make install
+                sudo ldconfig
+              fi
+              
+              # Install Tesseract
+              cd /tmp
+              if [ ! -f /usr/local/bin/tesseract ]; then
+                echo "📦 Building Tesseract..."
+                wget -q https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.3.0.tar.gz || true
+                tar -xzf 5.3.0.tar.gz || true
+                cd tesseract-5.3.0
+                export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+                export LD_LIBRARY_PATH=/usr/local/lib
+                ./autogen.sh
+                ./configure --quiet
+                make -j$(nproc)
+                sudo make install
+                sudo ldconfig
+              fi
+              
+              # Download English language data
+              sudo mkdir -p /usr/local/share/tessdata
+              if [ ! -f /usr/local/share/tessdata/eng.traineddata ]; then
+                echo "📦 Downloading Tesseract language data..."
+                sudo wget -q -O /usr/local/share/tessdata/eng.traineddata https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
+              fi
+              
+              cd /home/ec2-user
+            fi
+            
+            # Verify Tesseract
+            tesseract --version || echo "⚠️ Tesseract verification failed"
+            
+            # ========================================
+            # NGINX SETUP (Large files + WebSocket)
+            # ========================================
+            
+            if ! command -v nginx &> /dev/null; then
+              echo "🌐 Installing Nginx..."
+              sudo dnf install -y nginx
+            fi
+            
+            echo "🌐 Configuring Nginx for large files and WebSocket..."
+            
+            # Create temp directory for uploads
+            sudo mkdir -p /tmp/nginx_uploads
+            sudo chown nginx:nginx /tmp/nginx_uploads 2>/dev/null || sudo chown ec2-user:ec2-user /tmp/nginx_uploads
+            sudo chmod 755 /tmp/nginx_uploads
+            
+            # Nginx: only entry point. Frontend (Docker :3000) for / ; Backend (localhost:8000) for API/WS only
+            sudo tee /etc/nginx/conf.d/cad-tracker.conf > /dev/null << 'NGINXCONF'
+            upstream frontend {
+                server 127.0.0.1:3000;
+                keepalive 32;
+            }
+            upstream cad_backend {
+                server 127.0.0.1:8000;
+                keepalive 1000;
+            }
+
+            server {
+                listen 80;
+                server_name _;
+                
+                client_max_body_size 2G;
+                client_body_timeout 7200s;
+                client_body_buffer_size 10M;
+                client_body_temp_path /tmp/nginx_uploads;
+                proxy_request_buffering off;
+                proxy_buffering off;
+                proxy_connect_timeout 7200s;
+                proxy_send_timeout 7200s;
+                proxy_read_timeout 7200s;
+                send_timeout 7200s;
+                keepalive_timeout 0;
+                reset_timedout_connection off;
+                gzip on;
+                gzip_types text/plain text/css application/json application/javascript;
+
+                # Backend-only paths (backend not exposed; only via Nginx)
+                location /auth/ {
+                    proxy_pass http://cad_backend/auth/;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                }
+                location /upload {
+                    proxy_pass http://cad_backend/upload;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                }
+                location /upload-tags {
+                    proxy_pass http://cad_backend/upload-tags;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                }
+                location /jobs {
+                    proxy_pass http://cad_backend/jobs;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                }
+                location /cleanup {
+                    proxy_pass http://cad_backend/cleanup;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                }
+                location /download {
+                    proxy_pass http://cad_backend/download;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                }
+                location /static/ {
+                    proxy_pass http://cad_backend/static/;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header Connection "";
+                }
+                location /output_images/ {
+                    proxy_pass http://cad_backend/output_images/;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header Connection "";
+                }
+                location /ws {
+                    proxy_pass http://cad_backend/ws;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_read_timeout 604800s;
+                    proxy_send_timeout 604800s;
+                    proxy_connect_timeout 60s;
+                    proxy_buffering off;
+                    proxy_cache off;
+                    proxy_request_buffering off;
+                    proxy_set_header X-Accel-Buffering no;
+                    tcp_nodelay on;
+                }
+                location /health {
+                    access_log off;
+                    return 200 "OK";
+                    add_header Content-Type text/plain;
+                }
+                # Everything else -> frontend (Next.js in Docker)
+                location / {
+                    proxy_pass http://frontend;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                    proxy_set_header Connection "";
+                }
+            }
+            NGINXCONF
+            
+            # Remove default config if exists
+            sudo rm -f /etc/nginx/conf.d/default.conf 2>/dev/null || true
+            
+            # Test and restart Nginx
+            sudo nginx -t && echo "Nginx config OK" || (echo "Nginx config FAILED" && exit 1)
+            sudo systemctl enable nginx
+            sudo systemctl restart nginx
+            sudo systemctl status nginx --no-pager || true
+            
+            # ========================================
+            # APP SETUP & DEPLOYMENT
+            # ========================================
+            
+            mkdir -p /home/ec2-user/cad-material-tracker
+            cd /home/ec2-user/cad-material-tracker
+            
+            # Clone or pull repo
+            if [ ! -d ".git" ]; then
+              echo "📥 Cloning repository..."
+              git clone https://github.com/abbasghori29/CAD-material-tracker.git .
+            else
+              echo "📥 Pulling latest code..."
+              git fetch origin
+              git reset --hard origin/main
+            fi
+            
+            # Create virtual environment
+            if [ ! -d "venv312" ]; then
+              echo "🔧 Creating Python virtual environment..."
+              python3.12 -m venv venv312
+            fi
+            
+            # Install dependencies
+            echo "📦 Installing Python dependencies..."
+            source venv312/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements.txt
+            
+            # ========================================
+            # FIX: Tesseract path in app.py
+            # ========================================
+            
+            # Tesseract path is now auto-detected in app.py
+            # No manual patching needed - code checks common paths + system PATH
+            
+            # ========================================
+            # ENVIRONMENT FILE
+            # ========================================
+            
+            echo "⚙️ Creating/Updating .env file..."
+            cat > .env << ENVFILE
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
+            JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+            ROBOFLOW_API_KEY=${{ secrets.ROBOFLOW_API_KEY }}
+            ROBOFLOW_MODEL_ID=${{ secrets.ROBOFLOW_MODEL_ID }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            LLAMA_PARSE_API_KEY=${{ secrets.LLAMA_PARSE_API_KEY }}
+            AUTO_CLEANUP=true
+            ENVFILE
+            
+            # ========================================
+            # SYSTEMD SERVICE (with all environment vars)
+            # ========================================
+            
+            echo "🔄 Configuring systemd service..."
+            sudo tee /etc/systemd/system/cad-tracker.service > /dev/null << 'SERVICE'
+            [Unit]
+            Description=CAD Material Tracker FastAPI Application
+            After=network.target nginx.service
+            Wants=nginx.service
+
+            [Service]
+            Type=simple
+            User=ec2-user
+            Group=ec2-user
+            WorkingDirectory=/home/ec2-user/cad-material-tracker
+            Environment="PATH=/home/ec2-user/cad-material-tracker/venv312/bin:/usr/local/bin:/usr/bin"
+            Environment="TESSDATA_PREFIX=/usr/local/share/tessdata"
+            Environment="LD_LIBRARY_PATH=/usr/local/lib"
+            Environment="PYTHONUNBUFFERED=1"
+            ExecStart=/home/ec2-user/cad-material-tracker/venv312/bin/python -u /home/ec2-user/cad-material-tracker/run.py
+            Restart=always
+            RestartSec=5
+            StandardOutput=journal
+            StandardError=journal
+
+            [Install]
+            WantedBy=multi-user.target
+            SERVICE
+            
+            # Reload and restart backend
+            sudo systemctl daemon-reload
+            sudo systemctl enable cad-tracker
+            sudo systemctl restart cad-tracker
+            
+            # Wait for backend to start
+            sleep 5
+            
+            # ========================================
+            # DOCKER + FRONTEND (only frontend exposed via Nginx)
+            # ========================================
+            
+            if ! command -v docker &> /dev/null; then
+              echo "🐳 Installing Docker..."
+              sudo dnf install -y docker
+              sudo systemctl enable docker
+              sudo systemctl start docker
+            fi
+            
+            echo "🐳 Building and running frontend (Docker)..."
+            cd /home/ec2-user/cad-material-tracker
+            sudo docker compose build --no-cache frontend 2>/dev/null || sudo docker-compose build --no-cache frontend 2>/dev/null || true
+            sudo docker compose up -d frontend 2>/dev/null || sudo docker-compose up -d frontend 2>/dev/null || true
+            
+            # Restart Nginx to pick up config (frontend + backend upstreams)
+            sudo nginx -t && sudo systemctl restart nginx
+            
+            # ========================================
+            # VERIFICATION
+            # ========================================
+            
+            echo ""
+            echo "============================================"
+            echo "✅ DEPLOYMENT COMPLETE!"
+            echo "============================================"
+            echo ""
+            echo "🌐 Only Nginx (port 80) is exposed. Frontend → Docker :3000, Backend → localhost:8000 (systemd)."
+            echo "   App URL: http://${{ secrets.EC2_HOST }}"
+            echo "   WebSocket: ws://${{ secrets.EC2_HOST }}/ws"
+            echo ""
+            echo "📋 Installed Components:"
+            echo "   - Frontend: Docker (absolute-builders-frontend)"
+            echo "   - Backend: systemd (cad-tracker)"
+            echo "   - Python 3.12: $(python3.12 --version 2>&1 || echo 'Not found')"
+            echo "   - Tesseract: $(tesseract --version 2>&1 | head -1 || echo 'Not found')"
+            echo "   - Nginx: $(nginx -v 2>&1 || echo 'Not found')"
+            echo "   - Docker: $(sudo docker --version 2>&1 || echo 'Not found')"
+            echo "   - Fonts: $(fc-list | wc -l 2>/dev/null || echo '0') fonts available"
+            echo ""
+            echo "🔑 API Keys Configured (backend .env):"
+            echo "   - Roboflow: $([ -n '${{ secrets.ROBOFLOW_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
+            echo "   - OpenAI: $([ -n '${{ secrets.OPENAI_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
+            echo "   - LlamaParse: $([ -n '${{ secrets.LLAMA_PARSE_API_KEY }}' ] && echo '✅ Set' || echo '❌ Missing')"
+            echo ""
+            echo "📊 Service Status:"
+            sudo systemctl status cad-tracker --no-pager -l || true
+            sudo docker ps --filter name=absolute-builders-frontend 2>/dev/null || true
+            echo ""
+            echo "============================================"

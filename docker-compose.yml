@@ -1,0 +1,14 @@
+# Frontend only. Backend runs on host via systemd (localhost:8000).
+# Nginx on host proxies: / -> frontend:3000, /auth, /upload, /ws, etc. -> backend:8000
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: absolute-builders-frontend
+    container_name: absolute-builders-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NODE_ENV=production

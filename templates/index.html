@@ -1,0 +1,2682 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CAD Material Tracker - Live</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg-dark: #0a0e17;
+            --bg-card: #111827;
+            --bg-elevated: #1a2332;
+            --accent: #00D4FF;
+            --accent-dim: rgba(0, 212, 255, 0.15);
+            --accent-glow: rgba(0, 212, 255, 0.4);
+            --purple: #818CF8;
+            --red: #FF3B3B;
+            --red-dim: rgba(255, 59, 59, 0.15);
+            --text: #f0f6fc;
+            --text-dim: #8b949e;
+            --border: #30363d;
+            --success: #10B981;
+            --warning: #F59E0B;
+            --error: #EF4444;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+            /* Prevent horizontal scroll */
+            width: 100%;
+            max-width: 100vw;
+        }
+
+        html {
+            overflow-x: hidden;
+            width: 100%;
+            max-width: 100vw;
+        }
+
+        /* Background Grid */
+        .bg-grid {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image:
+                linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Header */
+        .header {
+            background: linear-gradient(180deg, var(--bg-card) 0%, transparent 100%);
+            border-bottom: 1px solid var(--border);
+            padding: 20px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: relative;
+            z-index: 10;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 20px var(--accent-glow);
+        }
+
+        .logo-icon i {
+            width: 26px;
+            height: 26px;
+            color: #000;
+        }
+
+        .logo-content {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .logo-text {
+            font-size: 1.4rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            line-height: 1.2;
+        }
+
+        .logo-subtitle {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            letter-spacing: 0.5px;
+        }
+
+        .manage-tags-btn {
+            padding: 10px 18px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+
+        .manage-tags-btn:hover {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+            transform: translateY(-2px);
+        }
+
+
+        /* Main Layout */
+        .main-container {
+            display: flex;
+            min-height: calc(100vh - 65px);
+            height: auto;
+            position: relative;
+            z-index: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        /* Upload Panel - Slide Container */
+        .upload-panel {
+            width: 100%;
+            max-width: 100vw;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            position: relative;
+            overflow-x: hidden;
+            overflow-y: auto;
+            box-sizing: border-box;
+            min-height: 100%;
+        }
+
+        /* Slide Wrapper */
+        .slide-wrapper {
+            width: 100%;
+            max-width: 600px;
+            position: relative;
+            overflow-x: hidden;
+            overflow-y: visible;
+            box-sizing: border-box;
+        }
+
+        /* Slides Container */
+        .slides-container {
+            display: flex;
+            transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+            width: 200%;
+            overflow: visible;
+        }
+
+        /* Individual Slide */
+        .slide {
+            width: 50%;
+            flex-shrink: 0;
+            padding: 0 20px;
+            box-sizing: border-box;
+        }
+
+        /* Progress Indicator */
+        .slide-progress {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 30px;
+        }
+
+        .progress-step {
+            width: 40px;
+            height: 4px;
+            background: var(--border);
+            border-radius: 2px;
+            transition: all 0.3s;
+        }
+
+        .progress-step.active {
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        .progress-step.completed {
+            background: var(--success);
+        }
+
+        /* Navigation Buttons */
+        .slide-nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 30px;
+            gap: 16px;
+            width: 100%;
+            box-sizing: border-box;
+            flex-wrap: wrap;
+        }
+
+        .btn-nav {
+            padding: 12px 24px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.95rem;
+        }
+
+        .btn-nav:hover:not(:disabled) {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+            transform: translateY(-2px);
+        }
+
+        .btn-nav:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-nav-primary {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            border: none;
+            color: #000;
+        }
+
+        .btn-nav-primary:hover:not(:disabled) {
+            box-shadow: 0 10px 30px var(--accent-glow);
+        }
+
+        .upload-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 40px;
+            width: 100%;
+            max-width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+            box-sizing: border-box;
+            overflow: visible;
+            margin-bottom: 20px;
+        }
+
+        .upload-card-title {
+            text-align: center;
+            margin-bottom: 30px;
+            width: 100%;
+            box-sizing: border-box;
+            word-wrap: break-word;
+        }
+
+        .upload-card-title h2 {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .upload-card-title p {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .upload-zone {
+            border: 2px dashed var(--border);
+            border-radius: 16px;
+            padding: 50px 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 24px;
+            background: var(--bg-elevated);
+            box-sizing: border-box;
+            width: 100%;
+            overflow: visible;
+            word-wrap: break-word;
+        }
+
+        .upload-zone:hover,
+        .upload-zone.dragover {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+            box-shadow: 0 0 30px var(--accent-glow);
+        }
+
+        .upload-zone input {
+            display: none;
+        }
+
+        .upload-icon {
+            margin-bottom: 16px;
+        }
+
+        .upload-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .upload-subtitle {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            line-height: 1.4;
+        }
+
+        .file-selected {
+            background: var(--bg-elevated);
+            padding: 14px 18px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            border: 1px solid var(--accent);
+            width: 100%;
+            box-sizing: border-box;
+            word-break: break-word;
+        }
+
+        .file-icon {
+            display: flex;
+            align-items: center;
+        }
+
+        .file-info {
+            flex: 1;
+        }
+
+        .file-name {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--accent);
+        }
+
+        .file-pages {
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            margin-top: 2px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .form-group {
+            flex: 1;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 12px 14px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            box-sizing: border-box;
+            -webkit-appearance: none;
+            -moz-appearance: textfield;
+        }
+
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-dim);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-sizing: border-box;
+            word-wrap: break-word;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--purple) 100%);
+            color: #000;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px var(--accent-glow);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        /* Upload Modal */
+        /* Results Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            /* Darker backdrop */
+            backdrop-filter: blur(8px);
+            z-index: 2000;
+            /* Higher than processing view (1000) */
+            display: none;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+            overflow-y: auto;
+            /* Allow scrolling on small screens */
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 30px;
+            text-align: center;
+            min-width: 280px;
+            max-width: 70%;
+            width: auto;
+            max-height: 70vh;
+            overflow-y: auto;
+            /* Prevent overflow on mobile */
+            box-sizing: border-box;
+            margin: auto;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+
+            /* Header */
+            .header {
+                padding: 12px 16px;
+                flex-wrap: wrap;
+            }
+
+            .logo-text {
+                font-size: 1.1rem;
+            }
+
+            .logo-subtitle {
+                font-size: 0.75rem;
+            }
+
+            .logo-icon {
+                width: 40px;
+                height: 40px;
+            }
+
+            /* Main Container */
+            .main-container {
+                min-height: calc(100vh - 60px);
+                height: auto;
+                overflow-x: hidden;
+                overflow-y: auto;
+            }
+
+            /* Upload Panel */
+            .upload-panel {
+                padding: 12px;
+                width: 100%;
+                max-width: 100vw;
+                box-sizing: border-box;
+                min-height: calc(100vh - 60px);
+                justify-content: flex-start;
+                padding-top: 20px;
+            }
+
+            .upload-card {
+                padding: 20px 16px;
+                width: 100%;
+                max-width: 100%;
+                margin-bottom: 16px;
+            }
+
+            .upload-card-title h2 {
+                font-size: 1.2rem;
+            }
+
+            .upload-card-title p {
+                font-size: 0.85rem;
+            }
+
+            .slide-wrapper {
+                max-width: 100%;
+                width: 100%;
+            }
+
+            .slide {
+                padding: 0 8px;
+                width: 50%;
+                min-width: 0;
+                flex-shrink: 0;
+            }
+
+            .upload-zone {
+                padding: 30px 16px;
+                width: 100%;
+            }
+
+            .upload-icon i {
+                width: 48px !important;
+                height: 48px !important;
+            }
+
+            .upload-title {
+                font-size: 0.95rem;
+            }
+
+            .upload-subtitle {
+                font-size: 0.8rem;
+                word-break: break-word;
+            }
+
+            /* Modal */
+            .modal-overlay {
+                padding: 16px 12px;
+                align-items: flex-start;
+                padding-top: 20vh;
+            }
+
+            .modal-content {
+                padding: 24px 20px;
+                min-width: auto;
+                width: calc(100% - 24px);
+                max-width: calc(100% - 24px);
+                border-radius: 16px;
+                margin: 0 auto;
+            }
+
+            .modal-title {
+                font-size: 1.1rem;
+            }
+
+            .modal-subtitle {
+                font-size: 0.85rem;
+            }
+
+            /* Navigation */
+            .slide-nav {
+                flex-direction: column;
+                gap: 12px;
+                width: 100%;
+                margin-top: 20px;
+            }
+
+            .btn-nav {
+                width: 100%;
+                justify-content: center;
+                padding: 14px;
+                box-sizing: border-box;
+            }
+
+            /* Form */
+            .form-row {
+                flex-direction: column;
+                gap: 16px;
+            }
+
+            .form-group {
+                width: 100%;
+            }
+
+            input[type="number"] {
+                font-size: 0.9rem;
+                padding: 10px 12px;
+            }
+
+            .btn {
+                padding: 12px;
+                font-size: 0.95rem;
+            }
+
+            /* Processing View */
+            .processing-view {
+                top: 60px;
+                left: 10px;
+                right: 10px;
+                bottom: 10px;
+                padding: 12px;
+                border-radius: 16px;
+            }
+
+            .processing-view.active {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto auto;
+                gap: 12px;
+            }
+
+            .left-panel {
+                min-height: 300px;
+                max-height: 400px;
+            }
+
+            .panel-header {
+                padding: 12px 16px;
+                flex-wrap: wrap;
+            }
+
+            .panel-title {
+                font-size: 0.9rem;
+            }
+
+            .page-info {
+                font-size: 0.8rem;
+            }
+
+            .preview-container {
+                padding: 12px;
+            }
+
+            .stats-bar {
+                padding: 10px 12px;
+                gap: 12px;
+                flex-wrap: wrap;
+            }
+
+            .stat-value {
+                font-size: 1rem;
+            }
+
+            .stat-label {
+                font-size: 0.75rem;
+            }
+
+            .drawing-card {
+                margin-bottom: 14px;
+            }
+
+            .drawing-header {
+                padding: 12px 16px;
+                font-size: 0.95rem;
+            }
+
+            .drawing-number {
+                font-size: 1rem;
+            }
+
+            .drawing-preview {
+                padding: 12px;
+            }
+
+            .drawing-preview img {
+                max-height: 200px;
+            }
+
+            .drawing-tags {
+                padding: 14px 16px;
+                gap: 8px;
+            }
+
+            .tag {
+                padding: 6px 12px;
+                font-size: 0.9rem;
+            }
+
+            .drawing-location {
+                padding: 12px 16px;
+                font-size: 0.9rem;
+            }
+
+            .drawing-location-label,
+            .drawing-location-value {
+                font-size: 0.9rem;
+            }
+
+            .logs-panel {
+                flex: 0 0 150px;
+            }
+
+            .logs-header {
+                padding: 8px 12px;
+            }
+
+            .logs-title {
+                font-size: 0.85rem;
+            }
+
+            .logs-container {
+                padding: 8px;
+                font-size: 0.8rem;
+            }
+
+            .log-entry {
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+
+            .log-time {
+                min-width: 60px;
+                font-size: 0.75rem;
+            }
+
+            /* Results Panel */
+            .results-panel {
+                padding: 16px;
+            }
+
+            .results-header {
+                flex-direction: column;
+                gap: 12px;
+                align-items: flex-start;
+            }
+
+            .results-title {
+                font-size: 1rem;
+            }
+
+            .btn-download {
+                width: 100%;
+                justify-content: center;
+                padding: 12px;
+            }
+
+            .results-table-wrapper {
+                margin: 0 -16px;
+                padding: 0 16px;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            .results-table {
+                font-size: 0.8rem;
+                min-width: 450px;
+            }
+
+            .results-table th,
+            .results-table td {
+                padding: 8px 10px;
+            }
+
+            .results-table th {
+                font-size: 0.75rem;
+            }
+
+            .location-cell {
+                max-width: 150px;
+                font-size: 0.8rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+
+            /* Extra small screens */
+            * {
+                max-width: 100vw;
+            }
+
+            .header {
+                padding: 10px 12px;
+            }
+
+            .logo {
+                gap: 10px;
+            }
+
+            .logo-text {
+                font-size: 0.95rem;
+            }
+
+            .logo-subtitle {
+                font-size: 0.7rem;
+            }
+
+            .logo-icon {
+                width: 36px;
+                height: 36px;
+            }
+
+            .main-container {
+                min-height: calc(100vh - 55px);
+                height: auto;
+            }
+
+            .upload-panel {
+                min-height: calc(100vh - 55px);
+                padding-top: 16px;
+            }
+
+            .upload-panel {
+                padding: 8px;
+            }
+
+            .upload-card {
+                padding: 16px 12px;
+                margin-bottom: 12px;
+            }
+
+            .upload-card-title h2 {
+                font-size: 1.1rem;
+            }
+
+            .upload-card-title p {
+                font-size: 0.8rem;
+            }
+
+            .slide {
+                padding: 0 4px;
+                width: 50%;
+                min-width: 0;
+            }
+
+            .upload-zone {
+                padding: 24px 12px;
+            }
+
+            .upload-icon i {
+                width: 40px !important;
+                height: 40px !important;
+            }
+
+            .upload-title {
+                font-size: 0.9rem;
+            }
+
+            .upload-subtitle {
+                font-size: 0.75rem;
+                line-height: 1.4;
+            }
+
+            .progress-step {
+                width: 30px;
+            }
+
+            .form-row {
+                gap: 12px;
+            }
+
+            input[type="number"] {
+                font-size: 0.85rem;
+                padding: 10px;
+            }
+
+            .btn {
+                padding: 12px;
+                font-size: 0.9rem;
+            }
+
+            .file-selected {
+                padding: 10px 12px;
+                flex-wrap: wrap;
+            }
+
+            .file-name {
+                font-size: 0.8rem;
+            }
+
+            .modal-overlay {
+                padding: 12px 8px;
+                padding-top: 15vh;
+            }
+
+            .modal-content {
+                padding: 20px 16px;
+                width: calc(100% - 16px);
+                max-width: calc(100% - 16px);
+            }
+
+            .processing-view {
+                top: 50px;
+                left: 5px;
+                right: 5px;
+                bottom: 5px;
+                padding: 8px;
+            }
+
+            .left-panel {
+                min-height: 250px;
+                max-height: 300px;
+            }
+
+            .preview-container {
+                padding: 8px;
+            }
+
+            .stats-bar {
+                padding: 8px 10px;
+                gap: 8px;
+            }
+
+            .stat {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 4px;
+            }
+
+            .stat-value {
+                font-size: 0.9rem;
+            }
+
+            .results-panel {
+                padding: 12px;
+            }
+
+            .results-table-wrapper {
+                margin: 0 -12px;
+                padding: 0 12px;
+            }
+
+            .results-table-wrapper {
+                margin: 0 -12px;
+                padding: 0 12px;
+            }
+
+            .results-table {
+                font-size: 0.75rem;
+                min-width: 400px;
+            }
+
+            .results-table th,
+            .results-table td {
+                padding: 6px 6px;
+            }
+
+            .results-table th,
+            .results-table td {
+                padding: 6px 8px;
+            }
+        }
+
+        /* Beautiful Loading Animation */
+        .loader {
+            width: 60px;
+            height: 60px;
+            margin: 0 auto 24px;
+            position: relative;
+        }
+
+        .loader-ring {
+            width: 100%;
+            height: 100%;
+            border: 4px solid transparent;
+            border-top: 4px solid var(--accent);
+            border-right: 4px solid var(--purple);
+            border-radius: 50%;
+            animation: spin 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+            position: absolute;
+        }
+
+        .loader-ring:nth-child(2) {
+            width: 80%;
+            height: 80%;
+            top: 10%;
+            left: 10%;
+            border-top-color: var(--purple);
+            border-right-color: var(--accent);
+            animation-duration: 0.8s;
+            animation-direction: reverse;
+        }
+
+        .loader-ring:nth-child(3) {
+            width: 60%;
+            height: 60%;
+            top: 20%;
+            left: 20%;
+            border-top-color: var(--accent);
+            border-right-color: var(--purple);
+            animation-duration: 1.5s;
+        }
+
+        .loader-center {
+            width: 20px;
+            height: 20px;
+            background: linear-gradient(135deg, var(--accent), var(--purple));
+            border-radius: 50%;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation: pulse 1.5s ease-in-out infinite;
+            box-shadow: 0 0 20px var(--accent-glow);
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                transform: translate(-50%, -50%) scale(1);
+                opacity: 1;
+            }
+
+            50% {
+                transform: translate(-50%, -50%) scale(1.2);
+                opacity: 0.7;
+            }
+        }
+
+        /* Alternative: Dots Loading Animation */
+        .loader-dots {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            margin: 0 auto 24px;
+            height: 60px;
+        }
+
+        .loader-dot {
+            width: 12px;
+            height: 12px;
+            background: linear-gradient(135deg, var(--accent), var(--purple));
+            border-radius: 50%;
+            animation: dot-bounce 1.4s ease-in-out infinite;
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        .loader-dot:nth-child(1) {
+            animation-delay: 0s;
+        }
+
+        .loader-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .loader-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes dot-bounce {
+
+            0%,
+            80%,
+            100% {
+                transform: scale(0.8);
+                opacity: 0.5;
+            }
+
+            40% {
+                transform: scale(1.2);
+                opacity: 1;
+            }
+        }
+
+        .modal-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .modal-subtitle {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            margin-bottom: 16px;
+        }
+
+        .modal-progress {
+            width: 100%;
+            margin-top: 20px;
+        }
+
+        .progress-bar-inline {
+            width: 100%;
+            height: 4px;
+            background: var(--bg-elevated);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .progress-fill-inline {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--purple), var(--accent));
+            background-size: 200% 100%;
+            width: 0%;
+            border-radius: 2px;
+            animation: progress-shimmer 2s linear infinite;
+            transition: width 0.3s ease;
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        @keyframes progress-shimmer {
+            0% {
+                background-position: 200% 0;
+            }
+
+            100% {
+                background-position: -200% 0;
+            }
+        }
+
+        /* Processing View */
+        .processing-view {
+            position: fixed;
+            /* Fixed to viewport */
+            top: 90px;
+            left: 20px;
+            right: 20px;
+            bottom: 20px;
+            display: none;
+            /* Still hidden by default */
+            background: var(--bg-dark);
+            border-radius: 20px;
+            padding: 20px;
+            z-index: 1000;
+            overflow: auto;
+            /* Allow scrolling if screen is too small */
+            min-height: 500px;
+            /* Minimum height expectation */
+            box-sizing: border-box;
+        }
+
+        .processing-view.active {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr;
+            gap: 20px;
+            /* Padding is now on the base .processing-view */
+            /* Height is now managed by top/bottom/left/right and overflow: auto */
+            /* Overflow is now on the base .processing-view */
+            height: auto;
+            /* Let content define height within fixed bounds */
+            overflow: visible;
+            /* Let the parent .processing-view handle scrolling */
+        }
+
+        /* Left Panel - Full Page Preview */
+        .left-panel {
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-card);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+            min-width: 0;
+            /* Prevent grid blowout */
+            position: relative;
+            z-index: 1;
+        }
+
+        .panel-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--bg-elevated);
+            border-top-left-radius: 16px;
+            border-top-right-radius: 16px;
+        }
+
+        .panel-title {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .page-info {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent);
+            font-size: 0.9rem;
+        }
+
+        .preview-container {
+            flex: 1;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-dark);
+            overflow: auto;
+            border-bottom-left-radius: 16px;
+            border-bottom-right-radius: 16px;
+        }
+
+        .preview-container img {
+            max-width: 100%;
+            max-height: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .preview-placeholder {
+            text-align: center;
+            color: var(--text-dim);
+        }
+
+        .preview-placeholder .icon {
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        /* Right Panel - Detected Drawings & Logs */
+        .right-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            /* Flex column to stack Drawings and Logs */
+            height: 100%;
+            /* Fill the grid cell */
+            overflow: hidden;
+            /* Let children handle scroll */
+            min-width: 0;
+            /* Prevent grid blowout */
+            position: relative;
+            z-index: 1;
+        }
+
+        /* New Tag Badge Styles */
+        .tag-badge {
+            background: rgba(0, 255, 157, 0.15);
+            color: var(--accent);
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border: 2px solid rgba(0, 255, 157, 0.3);
+            margin-right: 8px;
+            margin-bottom: 8px;
+            box-shadow: 0 2px 8px rgba(0, 255, 157, 0.2);
+            transition: all 0.2s;
+        }
+
+        .tag-badge:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 255, 157, 0.3);
+        }
+
+        .drawings-scroll {
+            flex: 1;
+            overflow-y: scroll;
+            /* Force scrollbar */
+            overflow-x: hidden;
+            padding: 20px;
+            min-height: 0;
+            max-height: 100%;
+        }
+
+        .drawing-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            margin-bottom: 16px;
+            overflow: hidden;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .drawing-card.active {
+            border-color: var(--red);
+            box-shadow: 0 0 25px var(--red-dim);
+        }
+
+        .drawing-header {
+            padding: 14px 18px;
+            background: var(--bg-dark);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .drawing-number {
+            font-weight: 700;
+            color: var(--red);
+            font-size: 1.1rem;
+        }
+
+        .drawing-confidence {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-dim);
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .drawing-preview {
+            padding: 16px;
+            background: var(--bg-dark);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .drawing-preview img {
+            max-width: 100%;
+            max-height: 280px;
+            width: auto;
+            border-radius: 8px;
+            border: 2px solid var(--border);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+            object-fit: contain;
+        }
+
+        .drawing-tags {
+            padding: 16px 18px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            background: var(--bg-elevated);
+        }
+
+        .tag {
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .tag-found {
+            background: var(--accent-dim);
+            color: var(--accent);
+            border: 2px solid var(--accent);
+            box-shadow: 0 2px 8px var(--accent-glow);
+        }
+
+        .tag-found:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px var(--accent-glow);
+        }
+
+        .tag-none {
+            background: var(--bg-dark);
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+        }
+
+        /* Bottom Logs */
+        .logs-panel {
+            flex: 0 0 200px;
+            /* Fixed height, don't grow or shrink */
+            border-top: 1px solid var(--border);
+            background: var(--bg-elevated);
+            border-radius: 16px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            /* Contain children */
+        }
+
+        .logs-header {
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+            background: var(--bg-elevated);
+            /* Sticky appearance */
+        }
+
+        .logs-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .logs-container {
+            flex: 1;
+            overflow-y: scroll;
+            /* Force scrollbar */
+            overflow-x: hidden;
+            padding: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            min-height: 0;
+            /* Critical for flex scrolling */
+            scroll-behavior: smooth;
+        }
+
+        .log-entry {
+            padding: 4px 0;
+            display: flex;
+            gap: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .log-time {
+            color: var(--text-dim);
+            min-width: 70px;
+        }
+
+        .log-icon {
+            width: 16px;
+        }
+
+        .log-success {
+            color: var(--success);
+        }
+
+        .log-warning {
+            color: var(--warning);
+        }
+
+        .log-error {
+            color: var(--error);
+        }
+
+        .log-info {
+            color: var(--accent);
+        }
+
+        /* Stats Bar */
+        .stats-bar {
+            display: flex;
+            gap: 20px;
+            padding: 12px 20px;
+            background: var(--bg-dark);
+            border-bottom: 1px solid var(--border);
+            border-top-left-radius: 16px;
+            border-top-right-radius: 16px;
+            flex-shrink: 0;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+
+        /* Progress */
+        .progress-bar {
+            height: 4px;
+            background: var(--bg-dark);
+            border-bottom-left-radius: 16px;
+            border-bottom-right-radius: 16px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--purple));
+            width: 0%;
+            transition: width 0.3s;
+        }
+
+        /* Results Panel */
+        /* Results Panel - Full Page Overlay */
+        .results-panel {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100vw;
+            height: 100vh;
+            background: var(--bg-dark);
+            z-index: 3000;
+            /* Highest priority */
+            overflow-y: auto;
+            padding: 40px;
+            box-sizing: border-box;
+        }
+
+        .results-panel.active {
+            display: block;
+        }
+
+        .results-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .results-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .btn-download {
+            padding: 10px 20px;
+            background: var(--accent-dim);
+            border: 1px solid var(--accent);
+            border-radius: 8px;
+            color: var(--accent);
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+        }
+
+        .btn-download:hover {
+            background: var(--accent);
+            color: #000;
+        }
+
+        .results-table-wrapper {
+            width: 100%;
+            overflow-x: auto;
+            /* Allow horizontal scroll on small screens */
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 600px;
+            /* Minimum width to prevent cramping */
+        }
+
+        .results-table th,
+        .results-table td {
+            padding: 10px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .results-table th {
+            background: var(--bg-elevated);
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+        }
+
+        .material-badge {
+            background: var(--accent-dim);
+            color: var(--accent);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+        }
+
+        .location-cell {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--purple);
+            max-width: 250px;
+            word-wrap: break-word;
+        }
+
+        .drawing-location {
+            padding: 14px 18px;
+            background: var(--bg-dark);
+            border-top: 1px solid var(--border);
+            font-size: 0.95rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .drawing-location-label {
+            color: var(--text-dim);
+            font-weight: 500;
+            font-size: 1rem;
+        }
+
+        .drawing-location-value {
+            color: var(--purple);
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            font-size: 1rem;
+            word-wrap: break-word;
+            flex: 1;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-dark);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--accent);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="bg-grid"></div>
+
+    <!-- Upload Modal -->
+    <div class="modal-overlay" id="upload-modal">
+        <div class="modal-content">
+            <div class="loader">
+                <div class="loader-ring"></div>
+                <div class="loader-ring"></div>
+                <div class="loader-ring"></div>
+                <div class="loader-center"></div>
+            </div>
+            <div class="modal-title">Uploading File</div>
+            <div class="modal-subtitle" id="modal-filename">Please wait...</div>
+            <div class="modal-progress">
+                <div class="progress-bar-inline">
+                    <div class="progress-fill-inline"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="header">
+        <div class="logo">
+            <div class="logo-icon">
+                <i data-lucide="building-2"></i>
+            </div>
+            <div class="logo-content">
+                <span class="logo-text">CAD Material Tracker</span>
+                <span class="logo-subtitle">AI-Powered Drawing Analysis</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <!-- Upload Panel - Slide Based -->
+        <div class="upload-panel" id="upload-panel">
+            <div class="slide-wrapper">
+                <!-- Progress Indicator -->
+                <div class="slide-progress">
+                    <div class="progress-step active" id="step-1-indicator"></div>
+                    <div class="progress-step" id="step-2-indicator"></div>
+                </div>
+
+                <!-- Slides Container -->
+                <div class="slides-container" id="slides-container">
+                    <!-- Slide 1: Upload Tags -->
+                    <div class="slide" id="slide-1">
+                        <div class="upload-card">
+                            <div class="upload-card-title">
+                                <h2>Step 1: Upload Tag List</h2>
+                                <p>Upload CSV or Excel file (XLSX/XLS) with tags to detect</p>
+                            </div>
+
+                            <div class="upload-zone" id="tags-dropzone">
+                                <input type="file" id="tags-file-input"
+                                    accept=".csv,.xlsx,.xls,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv">
+                                <div class="upload-icon"><i data-lucide="file-spreadsheet"
+                                        style="width:64px;height:64px;color:var(--accent)"></i></div>
+                                <div class="upload-title">Drop CSV/Excel Here</div>
+                                <div class="upload-subtitle">or click to browse • Supports: CSV, XLSX, XLS • Format:
+                                    tag,description</div>
+                            </div>
+
+                            <div class="file-selected" id="tags-file-selected" style="display: none;">
+                                <div class="file-icon"><i data-lucide="file-check"
+                                        style="width:24px;height:24px;color:var(--success)"></i></div>
+                                <div class="file-info">
+                                    <div class="file-name" id="tags-file-name"></div>
+                                    <div class="file-pages" id="tags-count"></div>
+                                </div>
+                            </div>
+
+                            <div class="slide-nav">
+                                <div></div>
+                                <button class="btn-nav btn-nav-primary" id="next-to-pdf" onclick="goToSlide(2)"
+                                    disabled>
+                                    Next Step
+                                    <i data-lucide="arrow-right" style="width:18px;height:18px"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Slide 2: Upload PDF -->
+                    <div class="slide" id="slide-2">
+                        <div class="upload-card">
+                            <div class="upload-card-title">
+                                <h2>Step 2: Upload CAD Drawings</h2>
+                                <p>Extract material tags from PDF drawings using AI</p>
+                            </div>
+
+                            <div class="upload-zone" id="dropzone">
+                                <input type="file" id="file-input" accept=".pdf">
+                                <div class="upload-icon"><i data-lucide="file-up"
+                                        style="width:64px;height:64px;color:var(--accent)"></i></div>
+                                <div class="upload-title">Drop PDF Here</div>
+                                <div class="upload-subtitle">or click to browse</div>
+                            </div>
+
+                            <div class="file-selected" id="file-selected" style="display: none;">
+                                <div class="file-icon"><i data-lucide="file-check"
+                                        style="width:24px;height:24px;color:var(--success)"></i></div>
+                                <div class="file-info">
+                                    <div class="file-name" id="file-name"></div>
+                                    <div class="file-pages" id="file-pages"></div>
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Start Page <span
+                                            style="color:var(--text-dim);font-weight:normal">(optional)</span></label>
+                                    <input type="number" id="start-page" placeholder="1" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label>End Page <span
+                                            style="color:var(--text-dim);font-weight:normal">(optional)</span></label>
+                                    <input type="number" id="end-page" placeholder="All" min="1">
+                                </div>
+                            </div>
+
+                            <div class="slide-nav">
+                                <button class="btn-nav" onclick="goToSlide(1)">
+                                    <i data-lucide="arrow-left" style="width:18px;height:18px"></i>
+                                    Previous
+                                </button>
+                                <button class="btn-nav btn-nav-primary" id="start-btn" disabled
+                                    onclick="startProcessing()">
+                                    <i data-lucide="play" style="width:18px;height:18px"></i>
+                                    Start Processing
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Processing View -->
+    <div class="processing-view" id="processing-view">
+        <!-- Left: Full Page Preview -->
+        <div class="left-panel">
+            <div class="panel-header">
+                <div class="panel-title"><i data-lucide="file-image" style="width:18px;height:18px"></i> Full Page
+                    Preview</div>
+                <div class="page-info" id="page-info">Page 0 / 0</div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <div class="preview-container" id="full-page-preview">
+                <div class="preview-placeholder">
+                    <div class="icon"><i data-lucide="file-scan" style="width:48px;height:48px"></i></div>
+                    <div>Waiting for page...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: Detected Drawings -->
+        <div class="right-panel">
+            <div class="panel-header">
+                <div class="panel-title"><i data-lucide="scan" style="width:18px;height:18px"></i> Detected Drawings
+                </div>
+                <div class="page-info" id="drawing-count">0 drawings</div>
+            </div>
+            <div class="stats-bar">
+                <div class="stat">
+                    <div class="stat-value" id="stat-pages">0</div>
+                    <div class="stat-label">Pages</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="stat-drawings">0</div>
+                    <div class="stat-label">Drawings</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="stat-tags">0</div>
+                    <div class="stat-label">Tags</div>
+                </div>
+            </div>
+            <div class="drawings-scroll" id="drawings-container">
+                <div style="text-align: center; color: var(--text-dim); padding: 40px;">
+                    Waiting for detections...
+                </div>
+            </div>
+            <div class="logs-panel">
+                <div class="logs-header">
+                    <div class="logs-title"><i data-lucide="terminal" style="width:16px;height:16px"></i> Live Logs
+                    </div>
+                </div>
+                <div class="logs-container" id="logs-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Panel -->
+    <div class="results-panel" id="results-panel">
+        <div class="results-header">
+            <div class="results-title"><i data-lucide="table-2" style="width:20px;height:20px"></i> Extraction Results
+            </div>
+            <button class="btn-download" onclick="downloadResults()"><i data-lucide="download"
+                    style="width:16px;height:16px"></i> Download CSV</button>
+        </div>
+        <div class="results-table-wrapper">
+            <table class="results-table">
+                <thead>
+                    <tr>
+                        <th>Material Type</th>
+                        <th>Tag</th>
+                        <th>Sheet</th>
+                        <th>Page</th>
+                        <th>Description</th>
+                        <th>Location</th>
+                        <th>Confidence</th>
+                    </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let uploadedFilePath = null;
+        let totalPages = 0;
+        let currentDrawings = [];
+        let stats = { pages: 0, drawings: 0, tags: 0 };
+        let jobId = null;  // Global job ID for auto-resume
+        let currentSlide = 1;  // Track current slide (1 or 2)
+
+        // Auto-resume job on page load if one exists
+        async function checkAndResumeJob() {
+            const savedJobId = localStorage.getItem('cad_tracker_job_id');
+            if (!savedJobId) return;
+
+            try {
+                const response = await fetch(`/api/jobs/${savedJobId}`);
+                const data = await response.json();
+
+                if (data.error) {
+                    // Job not found - clear localStorage
+                    localStorage.removeItem('cad_tracker_job_id');
+                    return;
+                }
+
+                // Job exists and is still running
+                if (data.status === 'running') {
+                    console.log('[AUTO-RESUME] Found active job:', savedJobId);
+
+                    // Show processing view
+                    document.getElementById('upload-panel').style.display = 'none';
+                    document.getElementById('processing-view').classList.add('active');
+
+                    // Start WebSocket and subscribe to existing job
+                    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+
+                    ws.onopen = () => {
+                        console.log('[AUTO-RESUME] Connected, subscribing to job', savedJobId);
+                        ws.send(JSON.stringify({
+                            action: 'subscribe',
+                            job_id: savedJobId
+                        }));
+
+                        // Setup visibility keepalive for auto-resume
+                        setupVisibilityKeepalive();
+                        requestWakeLock();
+                    };
+
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        console.log('[WS] Received:', data.type);
+
+                        // Set jobId for this session
+                        if (data.job_id) {
+                            jobId = data.job_id;
+                        }
+
+                        if (data.type === 'reconnect_summary') {
+                            jobId = data.job_id;
+                            addLog('success', `🔄 Resumed job ${data.job_id}`);
+                            addLog('info', `📊 Progress: Page ${data.current_page}/${data.total_pages} | ${data.results_count} tags found`);
+
+                            // Update stats
+                            stats.pages = data.pages_processed;
+                            stats.tags = data.results_count;
+                            updateStats();
+
+                            // Clear drawings container for replayed images
+                            document.getElementById('drawings-container').innerHTML = '';
+                            document.getElementById('page-info').textContent = `Page ${data.current_page} (Reconnected)`;
+                        } else if (data.type === 'tag_match') {
+                            // Update the specific drawing card with the found tag
+                            const drawingId = `drawing-${data.page}-${data.drawing_index}`;
+                            const drawingCard = document.getElementById(drawingId);
+
+                            if (drawingCard) {
+                                const tagContainer = drawingCard.querySelector('.drawing-tags');
+                                if (tagContainer) {
+                                    const tagBadge = document.createElement('span');
+                                    tagBadge.className = 'tag-badge';
+                                    tagBadge.innerHTML = `<i class="fas fa-tag"></i> ${data.tag}`;
+                                    tagContainer.appendChild(tagBadge);
+
+                                    // Remove empty state if present
+                                    const emptyState = tagContainer.querySelector('.tag-none');
+                                    if (emptyState) emptyState.remove();
+                                }
+                            }
+
+                            // Update global stats
+                            stats.tags++;
+                            updateStats();
+                        } else if (data.type === 'error') {
+                            addLog('error', data.message);
+                            localStorage.removeItem('cad_tracker_job_id');
+                        } else if (data.type === 'complete') {
+                            localStorage.removeItem('cad_tracker_job_id');
+                            handleMessage(data);
+                        } else {
+                            // Handle all other messages normally
+                            handleMessage(data);
+                        }
+                    };
+
+                    ws.onerror = (error) => {
+                        console.error('[AUTO-RESUME] WebSocket error:', error);
+                    };
+
+                    ws.onclose = () => {
+                        console.log('[AUTO-RESUME] WebSocket closed');
+                        // Try to reconnect if tab becomes visible again
+                        if (savedJobId && !document.hidden) {
+                            setTimeout(() => {
+                                checkAndResumeJob();
+                            }, 2000);
+                        }
+                    };
+                } else {
+                    // Job completed or failed - clear localStorage
+                    localStorage.removeItem('cad_tracker_job_id');
+                }
+            } catch (error) {
+                console.error('[AUTO-RESUME] Error checking job:', error);
+                localStorage.removeItem('cad_tracker_job_id');
+            }
+        }
+
+        // Check for saved job on page load
+        checkAndResumeJob();
+
+        // Page Visibility API - Prevent connection loss on tab inactivity
+        let isTabVisible = !document.hidden;
+        let visibilityCheckInterval = null;
+
+        document.addEventListener('visibilitychange', function () {
+            isTabVisible = !document.hidden;
+
+            if (isTabVisible) {
+                // Tab became visible - ensure connection is active
+                console.log('[VISIBILITY] Tab became visible');
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    // Connection is open, send a ping to verify
+                    try {
+                        ws.send(JSON.stringify({ action: 'ping' }));
+                    } catch (e) {
+                        console.log('[VISIBILITY] Connection may be dead, will reconnect');
+                    }
+                } else if (ws && ws.readyState !== WebSocket.CONNECTING && jobId) {
+                    // Try to reconnect if we have a job
+                    console.log('[VISIBILITY] Reconnecting after tab became visible');
+                    if (typeof connectWebSocket === 'function') {
+                        connectWebSocket();
+                    }
+                }
+            } else {
+                // Tab became hidden - keep connection alive with more frequent pings
+                console.log('[VISIBILITY] Tab became hidden - keeping connection alive');
+            }
+        });
+
+        // Keep connection alive even when tab is inactive
+        // Use a more aggressive keepalive when tab is hidden
+        function setupVisibilityKeepalive() {
+            if (visibilityCheckInterval) {
+                clearInterval(visibilityCheckInterval);
+            }
+
+            visibilityCheckInterval = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    // Send ping more frequently when tab is hidden to prevent browser from closing connection
+                    const pingInterval = isTabVisible ? 5000 : 2000; // Every 2s when hidden, 5s when visible
+
+                    try {
+                        ws.send(JSON.stringify({ action: 'ping' }));
+                    } catch (e) {
+                        console.error('[VISIBILITY] Keepalive ping failed:', e);
+                    }
+                }
+            }, 2000); // Check every 2 seconds
+        }
+
+        // Request wake lock to prevent browser from suspending (if supported)
+        let wakeLock = null;
+        async function requestWakeLock() {
+            if ('wakeLock' in navigator) {
+                try {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('[WAKELOCK] Screen wake lock acquired');
+
+                    wakeLock.addEventListener('release', () => {
+                        console.log('[WAKELOCK] Screen wake lock released');
+                    });
+                } catch (err) {
+                    console.log('[WAKELOCK] Wake lock request failed:', err);
+                }
+            }
+        }
+
+        // Release wake lock when page becomes visible again (optional)
+        document.addEventListener('visibilitychange', async () => {
+            if (document.hidden && wakeLock !== null) {
+                // Keep wake lock even when hidden to prevent suspension
+                return;
+            }
+        });
+
+        // Slide Navigation Function
+        function goToSlide(slideNumber) {
+            const slidesContainer = document.getElementById('slides-container');
+            const step1Indicator = document.getElementById('step-1-indicator');
+            const step2Indicator = document.getElementById('step-2-indicator');
+
+            if (slideNumber === 1) {
+                slidesContainer.style.transform = 'translateX(0%)';
+                step1Indicator.classList.add('active');
+                step1Indicator.classList.remove('completed');
+                step2Indicator.classList.remove('active');
+                currentSlide = 1;
+            } else if (slideNumber === 2) {
+                slidesContainer.style.transform = 'translateX(-50%)';
+                step1Indicator.classList.remove('active');
+                step1Indicator.classList.add('completed');
+                step2Indicator.classList.add('active');
+                currentSlide = 2;
+            }
+
+            lucide.createIcons();
+        }
+
+        // Cleanup any lingering WebSocket connections on page refresh
+        window.addEventListener('beforeunload', function () {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                console.log('[REFRESH] Closing WebSocket - job will pause (resume on reload)');
+                ws.close(1000, 'Page refresh');
+            }
+        });
+
+        // Step 1: Tags CSV/XLSX upload handlers
+        const tagsDropzone = document.getElementById('tags-dropzone');
+        const tagsFileInput = document.getElementById('tags-file-input');
+        let tagsUploaded = false;
+
+        tagsDropzone.addEventListener('click', () => tagsFileInput.click());
+        tagsDropzone.addEventListener('dragover', (e) => { e.preventDefault(); tagsDropzone.classList.add('dragover'); });
+        tagsDropzone.addEventListener('dragleave', () => tagsDropzone.classList.remove('dragover'));
+        tagsDropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            tagsDropzone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleTagsUpload(e.dataTransfer.files[0]);
+        });
+        tagsFileInput.addEventListener('change', () => {
+            if (tagsFileInput.files.length) handleTagsUpload(tagsFileInput.files[0]);
+        });
+
+        async function handleTagsUpload(file) {
+            // Validate file type
+            const fileName = file.name.toLowerCase();
+            const validExtensions = ['.csv', '.xlsx', '.xls'];
+            const isValidFile = validExtensions.some(ext => fileName.endsWith(ext));
+
+            if (!isValidFile) {
+                addLog('error', 'Invalid file type. Please upload CSV, XLSX, or XLS file.');
+                return;
+            }
+
+            // Show upload modal
+            document.getElementById('modal-filename').textContent = file.name;
+            document.querySelector('#upload-modal .modal-title').textContent = 'Uploading Tag List';
+            document.querySelector('#upload-modal .progress-fill-inline').style.width = '0%';
+            uploadModal.classList.add('active');
+
+            // Simulate progress
+            let progress = 0;
+            const progressInterval = setInterval(() => {
+                progress += Math.random() * 15;
+                if (progress > 90) progress = 90;
+                document.querySelector('#upload-modal .progress-fill-inline').style.width = progress + '%';
+            }, 200);
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload-tags', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                // Complete progress
+                clearInterval(progressInterval);
+                document.querySelector('#upload-modal .progress-fill-inline').style.width = '100%';
+
+                if (data.success) {
+                    document.getElementById('tags-file-selected').style.display = 'flex';
+                    document.getElementById('tags-file-name').textContent = file.name;
+                    document.getElementById('tags-count').textContent = `${data.count} tags loaded`;
+
+                    // Enable next button
+                    document.getElementById('next-to-pdf').disabled = false;
+                    tagsUploaded = true;
+
+                    // Hide modal after showing success
+                    setTimeout(() => {
+                        uploadModal.classList.remove('active');
+                        // Auto-advance to next slide after a short delay
+                        setTimeout(() => {
+                            goToSlide(2);
+                        }, 300);
+                    }, 800);
+                } else {
+                    uploadModal.classList.remove('active');
+                    addLog('error', 'Tags upload failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                clearInterval(progressInterval);
+                uploadModal.classList.remove('active');
+                addLog('error', 'Tags upload failed: ' + error.message);
+            }
+        }
+
+        // Step 2: File upload handlers (PDF)
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('file-input');
+        const uploadModal = document.getElementById('upload-modal');
+
+        dropzone.addEventListener('click', () => fileInput.click());
+        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFileUpload(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) handleFileUpload(fileInput.files[0]);
+        });
+
+        async function handleFileUpload(file) {
+            // Show upload modal
+            document.getElementById('modal-filename').textContent = file.name;
+            document.querySelector('#upload-modal .modal-title').textContent = 'Uploading PDF';
+            document.querySelector('#upload-modal .progress-fill-inline').style.width = '0%';
+            uploadModal.classList.add('active');
+
+            // Simulate progress
+            let progress = 0;
+            const progressInterval = setInterval(() => {
+                progress += Math.random() * 12;
+                if (progress > 85) progress = 85;
+                document.querySelector('#upload-modal .progress-fill-inline').style.width = progress + '%';
+            }, 200);
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                // Complete progress
+                clearInterval(progressInterval);
+                document.querySelector('#upload-modal .progress-fill-inline').style.width = '100%';
+
+                uploadedFilePath = data.path;
+                totalPages = data.pages;
+
+                // Update UI but keep modal visible
+                document.getElementById('file-selected').style.display = 'flex';
+                document.getElementById('file-name').textContent = data.filename;
+                document.getElementById('file-pages').textContent = `${data.pages} pages`;
+                document.getElementById('end-page').placeholder = data.pages;
+                document.getElementById('start-btn').disabled = false;
+
+                addLog('info', `Uploaded: ${data.filename} (${data.pages} pages)`);
+
+                // Hide modal after showing completion
+                setTimeout(() => {
+                    uploadModal.classList.remove('active');
+                }, 800);
+            } catch (error) {
+                clearInterval(progressInterval);
+                uploadModal.classList.remove('active');
+                addLog('error', 'Upload failed: ' + error.message);
+            }
+        }
+
+        function startProcessing() {
+            // Hide upload panel and show processing view
+            document.getElementById('upload-panel').style.display = 'none';
+            document.getElementById('processing-view').classList.add('active');
+
+            // Prevent body scroll when processing view is active
+            document.body.style.overflow = 'hidden';
+
+            currentDrawings = [];
+            stats = { pages: 0, drawings: 0, tags: 0 };
+            document.getElementById('drawings-container').innerHTML = '';
+            document.getElementById('logs-container').innerHTML = '';
+
+            // Clear any old job ID (starting new job)
+            localStorage.removeItem('cad_tracker_job_id');
+            jobId = null;  // Reset job ID for new job
+
+            // JOB STATE - bulletproof tracking
+            let jobStarted = false;
+            let jobComplete = false;
+            let reconnectAttempts = 0;
+            let maxReconnectAttempts = 999;  // Essentially infinite
+            let lastPongReceived = Date.now();
+            let clientPingInterval = null;
+            let connectionMonitor = null;  // Connection health monitor
+
+            // Store processing params
+            const startVal = document.getElementById('start-page').value;
+            const endVal = document.getElementById('end-page').value;
+            const processParams = {
+                action: 'process',
+                pdf_path: uploadedFilePath,
+                start_page: startVal ? parseInt(startVal) : 1,
+                end_page: endVal ? parseInt(endVal) : totalPages
+            };
+
+            function connectWebSocket() {
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+
+                ws.onopen = () => {
+                    lastPongReceived = Date.now();
+                    reconnectAttempts = 0;  // Reset on successful connect
+
+                    if (!jobStarted) {
+                        // First connection - start new job
+                        addLog('info', '🔗 Connected to server');
+                        ws.send(JSON.stringify(processParams));
+                        jobStarted = true;
+                    } else if (jobId) {
+                        // Reconnection - subscribe to existing job
+                        addLog('success', `🔄 Reconnected! Resuming job ${jobId}...`);
+                        ws.send(JSON.stringify({
+                            action: 'subscribe',
+                            job_id: jobId
+                        }));
+                    } else {
+                        addLog('warning', 'Reconnected but no job ID found');
+                    }
+
+                    // Clear any existing intervals
+                    if (clientPingInterval) clearInterval(clientPingInterval);
+                    if (connectionMonitor) clearInterval(connectionMonitor);
+
+                    // Send ping to keep connection alive (interval adjusted by visibility)
+                    clientPingInterval = setInterval(() => {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            try {
+                                // More frequent pings when tab is hidden to prevent browser suspension
+                                const pingInterval = isTabVisible ? 5000 : 2000;
+                                ws.send(JSON.stringify({ action: 'ping' }));
+                            } catch (e) {
+                                console.error('Ping failed:', e);
+                            }
+                        }
+                    }, isTabVisible ? 5000 : 2000);
+
+                    // Setup visibility-based keepalive
+                    setupVisibilityKeepalive();
+
+                    // Request wake lock to prevent browser suspension
+                    if (jobId || !jobStarted) {
+                        requestWakeLock();
+                    }
+
+                    // Monitor connection health - if no pong in 60s, connection might be dead
+                    connectionMonitor = setInterval(() => {
+                        const timeSinceLastPong = Date.now() - lastPongReceived;
+                        if (timeSinceLastPong > 60000 && !processingComplete) {
+                            addLog('info', 'Still processing... please wait');
+                        }
+                    }, 30000);
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+
+                    // DEBUG: Log ALL received messages
+                    console.log('[WS] Received message:', data.type, data);
+
+                    // Track ALL messages for connection health
+                    lastPongReceived = Date.now();
+
+                    // Capture job ID when created
+                    if (data.type === 'job_created') {
+                        jobId = data.job_id;
+                        // Save to localStorage for auto-resume on refresh
+                        localStorage.setItem('cad_tracker_job_id', jobId);
+                        console.log('[JOB] Job created:', jobId, '(saved to localStorage)');
+                        addLog('success', `🎯 Job ${jobId} started - processing begins...`);
+                        return;
+                    }
+
+                    // Handle reconnect summary - WITH image replay
+                    if (data.type === 'reconnect_summary') {
+                        console.log('[JOB] Reconnect summary:', data);
+                        addLog('success', `⚡ Reconnected to job ${data.job_id}`);
+                        addLog('info', `📊 Progress: Page ${data.current_page}/${data.total_pages} | ${data.results_count} tags found`);
+                        addLog('info', `🔄 Replaying current page images...`);
+
+                        // Update stats display
+                        stats.pages = data.pages_processed;
+                        stats.tags = data.results_count;
+                        updateStats();
+
+                        // Clear drawings container for replayed images
+                        document.getElementById('drawings-container').innerHTML = '';
+                        document.getElementById('page-info').textContent = `Page ${data.current_page} (Reconnected)`;
+
+                        return;
+                    }
+
+                    // Track pong/heartbeat silently
+                    if (data.type === 'pong' || data.type === 'heartbeat') {
+                        return;
+                    }
+
+                    // Track progress silently
+                    if (data.type === 'progress') {
+                        return;
+                    }
+
+                    // Job complete
+                    if (data.type === 'complete') {
+                        jobComplete = true;
+                        localStorage.removeItem('cad_tracker_job_id'); // Clear saved job
+                        addLog('success', `✅ Job ${jobId} COMPLETE! ${data.total_tags} tags found.`);
+
+                        // Release wake lock when job completes
+                        if (wakeLock !== null) {
+                            wakeLock.release().then(() => {
+                                wakeLock = null;
+                                console.log('[WAKELOCK] Released after job completion');
+                            }).catch((e) => {
+                                console.log('[WAKELOCK] Error releasing:', e);
+                            });
+                        }
+                    }
+
+                    handleMessage(data);
+                };
+
+                ws.onerror = (error) => {
+                    console.error('[WS] Error:', error);
+                };
+
+                ws.onclose = (event) => {
+                    // Clear intervals
+                    if (clientPingInterval) clearInterval(clientPingInterval);
+                    if (visibilityCheckInterval) clearInterval(visibilityCheckInterval);
+
+                    console.log('[WS] Closed:', event.code, event.reason);
+
+                    // Don't treat close as error if tab was inactive - it might be browser suspension
+                    const wasInactive = !isTabVisible;
+
+                    if (jobComplete) {
+                        // Job finished - all done
+                        addLog('success', '✅ All done! Refresh page for new analysis.');
+                    } else if (jobId && reconnectAttempts < maxReconnectAttempts) {
+                        // Job still running - AUTO RECONNECT
+                        reconnectAttempts++;
+                        const delay = wasInactive ? 1000 : Math.min(1000 * reconnectAttempts, 5000);  // Faster reconnect if was inactive
+
+                        if (wasInactive) {
+                            addLog('info', `🔄 Tab was inactive. Reconnecting immediately...`);
+                        } else {
+                            addLog('warning', `⚠️ Connection lost. Reconnecting in ${delay / 1000}s... (attempt ${reconnectAttempts})`);
+                        }
+
+                        setTimeout(() => {
+                            console.log('[WS] Attempting reconnect...');
+                            connectWebSocket();
+                        }, delay);
+                    } else {
+                        addLog('error', '❌ Connection closed. Refresh page to restart.');
+                    }
+                };
+            }
+
+            connectWebSocket();
+
+            // Setup visibility monitoring for this connection
+            setupVisibilityKeepalive();
+        }
+
+        function handleMessage(data) {
+            switch (data.type) {
+                case 'info':
+                    totalPages = data.total_pages;
+                    break;
+
+                case 'page_start':
+                    // Only show sheet if it's not N/A
+                    if (data.sheet && data.sheet !== 'N/A') {
+                        document.getElementById('page-info').textContent = `Page ${data.page} (Sheet ${data.sheet})`;
+                        addLog('info', `Processing page ${data.page} - Sheet ${data.sheet}`);
+                    } else {
+                        document.getElementById('page-info').textContent = `Page ${data.page}`;
+                        addLog('info', `Processing page ${data.page}`);
+                    }
+                    const progress = (data.progress / data.total) * 100;
+                    document.getElementById('progress-fill').style.width = progress + '%';
+                    currentDrawings = [];
+                    document.getElementById('drawings-container').innerHTML = '';
+                    // Use actual progress from backend instead of incrementing counter
+                    stats.pages = data.progress;
+                    updateStats();
+                    break;
+
+                case 'full_page':
+                    // Use image URL instead of base64 (prevents connection drops)
+                    document.getElementById('full-page-preview').innerHTML =
+                        `<img src="${data.image_url}" alt="Page ${data.page}">`;
+                    document.getElementById('drawing-count').textContent = `${data.drawing_count} drawings`;
+                    // Only show success log when annotated image arrives (with bounding boxes)
+                    if (data.annotated === true) {
+                        addLog('success', `Found ${data.drawing_count} drawings on page ${data.page}`);
+                    }
+                    break;
+
+                case 'drawing':
+                    stats.drawings++;
+                    updateStats();
+
+                    // Use image URL instead of base64 (prevents connection drops)
+                    const drawingHtml = `
+                        <div class="drawing-card active" id="drawing-${data.index}">
+                            <div class="drawing-header">
+                                <span class="drawing-number">Drawing #${data.index}</span>
+                                <span class="drawing-confidence">${data.confidence}</span>
+                            </div>
+                            <div class="drawing-preview">
+                                <img src="${data.image_url}" alt="Drawing ${data.index}">
+                            </div>
+                            <div class="drawing-location" id="location-${data.index}">
+                                <span class="drawing-location-label">📍 Location:</span>
+                                <span class="drawing-location-value">Extracting...</span>
+                            </div>
+                            <div class="drawing-tags" id="tags-${data.index}">
+                                <span class="tag tag-none">Scanning...</span>
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('drawings-container').innerHTML += drawingHtml;
+
+                    document.querySelectorAll('.drawing-card').forEach(c => c.classList.remove('active'));
+                    document.getElementById(`drawing-${data.index}`).classList.add('active');
+                    document.getElementById(`drawing-${data.index}`).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    lucide.createIcons();
+                    break;
+
+                case 'sheet_update':
+                    // Update page info with sheet name (without incrementing page counter)
+                    if (data.sheet && data.sheet !== 'N/A') {
+                        document.getElementById('page-info').textContent = `Page ${data.page} (Sheet ${data.sheet})`;
+                    }
+                    break;
+
+                case 'ocr_result':
+                    const tagsContainer = document.getElementById(`tags-${data.drawing_index}`);
+                    if (tagsContainer) {
+                        if (data.tags_found && data.tags_found.length > 0) {
+                            tagsContainer.innerHTML = data.tags_found
+                                .map(t => `<span class="tag tag-found">${t}</span>`)
+                                .join('');
+                        } else {
+                            tagsContainer.innerHTML = '<span class="tag tag-none">No tags found</span>';
+                        }
+                    }
+
+                    // Update location display
+                    const locationContainer = document.getElementById(`location-${data.drawing_index}`);
+                    if (locationContainer) {
+                        if (data.location && data.location.trim()) {
+                            locationContainer.innerHTML = `
+                                <span class="drawing-location-label">📍 Location:</span>
+                                <span class="drawing-location-value">${data.location}</span>
+                            `;
+                        } else {
+                            locationContainer.innerHTML = `
+                                <span class="drawing-location-label">📍 Location:</span>
+                                <span class="drawing-location-value" style="color: var(--text-dim);">Not detected</span>
+                            `;
+                        }
+                    }
+                    break;
+
+                case 'log':
+                    addLog(data.level, data.message);
+                    break;
+
+                case 'complete':
+                    addLog('success', `Complete! Found ${data.total_tags} material tags`);
+
+                    if (data.results && data.results.length > 0) {
+                        showResults(data.results);
+
+                        // Auto-scroll to results table when work is done
+                        const resultsPanel = document.getElementById('results-panel');
+                        if (resultsPanel) {
+                            resultsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+
+                        // Auto-download CSV after 1 second delay
+                        setTimeout(() => {
+                            addLog('info', '📥 Auto-downloading CSV results...');
+                            downloadResults();
+                        }, 1000);
+                    }
+                    break;
+
+                case 'error':
+                    addLog('error', data.message);
+                    break;
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('stat-pages').textContent = stats.pages;
+            document.getElementById('stat-drawings').textContent = stats.drawings;
+            document.getElementById('stat-tags').textContent = stats.tags;
+        }
+
+        function addLog(level, message) {
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const icons = { info: '→', success: '✓', warning: '⚠', error: '✗' };
+            const logHtml = `
+                <div class="log-entry">
+                    <span class="log-time">${time}</span>
+                    <span class="log-icon log-${level}">${icons[level] || '→'}</span>
+                    <span>${message}</span>
+                </div>
+            `;
+            document.getElementById('logs-container').innerHTML += logHtml;
+            document.getElementById('logs-container').scrollTop = document.getElementById('logs-container').scrollHeight;
+        }
+
+        function showResults(results) {
+            // Hide processing view entirely
+            document.querySelector('.processing-view').style.display = 'none';
+            document.body.style.overflow = 'auto'; // Re-enable scroll for results
+
+            // Show results panel as new page
+            const resultsPanel = document.getElementById('results-panel');
+            resultsPanel.classList.add('active');
+            resultsPanel.style.display = 'block'; // Ensure it's visible
+
+            // Scroll to top
+            window.scrollTo(0, 0);
+
+            const tbody = document.getElementById('results-body');
+            tbody.innerHTML = results.map((r, i) => {
+                // strict sanitization
+                const desc = (r.description && r.description !== 'undefined' && r.description !== 'Unknown') ? r.description : '';
+                const loc = (r.location && r.location !== 'undefined') ? r.location : '';
+
+                return `
+                <tr>
+                    <td>${r.material_type || 'Unknown'}</td>
+                    <td><span class="material-badge">${r.tag || ''}</span></td>
+                    <td>${r.sheet || ''}</td>
+                    <td>${r.page || ''}</td>
+                    <td>${desc}</td>
+                    <td class="location-cell">${loc}</td>
+                    <td>${r.confidence || ''}</td>
+                </tr>
+            `}).join('');
+        }
+
+        function downloadResults() {
+            window.location.href = '/download';
+        }
+
+        // Initialize Lucide icons
+        lucide.createIcons();
+    </script>
+</body>
+
+</html>
