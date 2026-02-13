@@ -9,8 +9,28 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import text
+
 from app.core.config import UPLOAD_FOLDER, RESULTS_FOLDER, IMAGES_FOLDER
 from app.services.image_utils import cleanup_job_images
+
+
+def ping_database():
+    """
+    Run a trivial DB query to keep Supabase active (avoids 7-day pause on free tier).
+    Called from the daily cleanup job so no separate scheduler is needed.
+    """
+    try:
+        from app.db.session import SessionLocal
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            db.commit()
+            print("[CLEANUP] Database ping OK (Supabase keep-alive)")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[CLEANUP] Database ping failed (non-fatal): {e}")
 
 
 def cleanup_job_pdf(job_id: str, pdf_path: Optional[str] = None, max_retries: int = 5, retry_delay: float = 2.0):
@@ -100,10 +120,11 @@ def cleanup_temp_files():
 
 def scheduled_cleanup_uploads():
     """Clean up uploads, static/images, and results folders daily at 9:17 PM"""
-    from app.core.config import AUTO_CLEANUP
-    
     now = datetime.now()
     print(f"[CLEANUP] Scheduled cleanup started at {now}")
+
+    # Keep Supabase active (free tier pauses after ~7 days inactivity)
+    ping_database()
     
     folders_to_clean = [UPLOAD_FOLDER, IMAGES_FOLDER, RESULTS_FOLDER]
     total_deleted = 0
