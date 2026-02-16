@@ -10,12 +10,7 @@ import ProcessingView, { LogEntry, Drawing } from '../components/ProcessingView'
 import ResultsPanel, { ResultItem } from '../components/ResultsPanel';
 import { useWebSocket } from '../hooks/useWebSocket';
 
-const getApiUrl = () => {
-    if (typeof window === 'undefined') return '';
-    return window.location.port === '3000'
-        ? `http://${window.location.hostname}:8000`
-        : '';
-};
+import { getApiUrl } from '../utils/api';
 
 export default function Home() {
     const router = useRouter();
@@ -48,7 +43,6 @@ export default function Home() {
             return;
         }
 
-        // Fetch current user info
         fetch(`${getApiUrl()}/auth/me`, {
             headers: { Authorization: `Bearer ${token}` },
         })

@@ -3,6 +3,7 @@ import React, { useState, useRef } from 'react';
 import { FileSpreadsheet, FileCheck, ArrowRight, FileUp, Play, ArrowLeft } from 'lucide-react';
 import { clsx } from 'clsx';
 import Modal from './ui/Modal';
+import { getApiUrl } from '../utils/api';
 
 interface UploadPanelProps {
     onStartProcessing: (path: string, startPage: number, endPage: number) => void;
@@ -47,11 +48,7 @@ export default function UploadPanel({ onStartProcessing, onTagsUploaded }: Uploa
         }
     };
 
-    const getApiUrl = () => {
-        return window.location.port === '3000'
-            ? `http://${window.location.hostname}:8000`
-            : '';
-    };
+    // API URL from centralized config
 
     const authHeaders = (): Record<string, string> => {
         const token = localStorage.getItem('ab_builders_token');

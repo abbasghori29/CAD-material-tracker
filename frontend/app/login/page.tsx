@@ -4,12 +4,7 @@ import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Building2, Eye, EyeOff } from 'lucide-react';
 
-const apiBase = () => {
-    if (typeof window === 'undefined') return '';
-    return window.location.port === '3000'
-        ? `http://${window.location.hostname}:8000`
-        : '';
-};
+import { getApiUrl } from '../../utils/api';
 
 export default function LoginPage() {
     const router = useRouter();
@@ -25,7 +20,7 @@ export default function LoginPage() {
         setLoading(true);
 
         try {
-            const res = await fetch(`${apiBase()}/auth/login`, {
+            const res = await fetch(`${getApiUrl()}/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password }),

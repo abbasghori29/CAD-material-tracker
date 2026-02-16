@@ -17,13 +17,18 @@ TAG_PATTERN = re.compile(r'(?i)[A-Z]+[-_./]?[A-Z]*[-_./]?[0-9IlO][A-Z0-9IlO]*')
 LOCATION_EXTRACTION_PROMPT = """Extract the drawing identifier and title/location from this CAD drawing image.
 
 Look carefully at these areas:
-- The circular bubble or rectangular box usually to the left of or above the main title (contains drawing ID).
+- The BOLD text at the bottom-left of the drawing (contains the drawing ID, usually in large bold font).
+- The circular bubble or rectangular box usually to the left of or above the main title.
 - Title block (usually bottom-right corner or top of page).
 - Drawing header/label (large text near top).
 
 Extraction Rules:
-1. Drawing ID: Extract the alphanumeric code (e.g., '1', '1-A101', 'A', 1 IN210, 2 ID202) that identifies this specific drawing on the sheet. It is often closest to the left of the location text.
-2. Location: Extract the main title or location identifier (e.g., 'LEVEL 3 PLAN', 'SECTION AT GARAGE').
+1. Drawing ID: Extract the alphanumeric code that identifies this specific drawing. It is typically bold text at the bottom of the drawing, to the left of the title.
+   - Drawing IDs are very commonly a LETTER followed by a NUMBER, e.g.: 'B7', 'A3', 'C1', 'D2', 'E5'
+   - Other valid formats: '1/A101', 'A', '1', '2 ID202', '1-A101'
+   - IMPORTANT: Pay close attention to distinguish letters from numbers. 'B' is NOT '8', '7' is NOT '1', 'I' is NOT '1'. Read the characters carefully.
+   - If you see bold text like 'B7' at the bottom-left, that is the drawing ID, not '1'.
+2. Location: Extract the main title or location identifier (e.g., 'PRESENTATION ELEVATION - KID\'S HIDEOUT', 'LEVEL 3 PLAN', 'SECTION AT GARAGE').
 
 Return both fields. Use empty string if a field is not found."""
 

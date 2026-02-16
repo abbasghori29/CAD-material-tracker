@@ -5,12 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { User, ArrowRight, Mail, UserCircle } from 'lucide-react';
 
-const getApiUrl = () => {
-    if (typeof window === 'undefined') return '';
-    return window.location.port === '3000'
-        ? `http://${window.location.hostname}:8000`
-        : '';
-};
+import { getApiUrl } from '../../utils/api';
 
 interface UserData {
     id: number;

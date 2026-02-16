@@ -47,7 +47,8 @@ export default function ProcessingView({
 
     let statusLine = '';
     if (status === 'running' && totalPageCount > 0 && currentPage > 0) {
-        statusLine = `Processing page ${currentPage} of ${totalPageCount}`;
+        // Show absolute page number AND progress index (e.g. "Page 76 (1 of 7)")
+        statusLine = `Processing page ${currentPage} (${stats.pages} of ${totalPageCount})`;
     } else if (status === 'running') {
         statusLine = 'Analyzing drawings...';
     } else if (status === 'complete') {
@@ -133,28 +134,28 @@ export default function ProcessingView({
                         <div className="font-mono text-[#00D4FF] text-sm">{drawings.length} drawings</div>
                     </div>
 
-                {/* Stats Bar + Status — Tags only shown after dedup (when > 0); per-drawing tags are in each card */}
-                <div className="flex items-center justify-between gap-5 p-[12px_20px] bg-[#0a0e17] border-b border-x border-[#30363d] flex-shrink-0">
-                    <div className="flex gap-5">
-                        <div className="flex items-center gap-2">
-                            <span className="font-mono text-[1.2rem] font-bold text-[#00D4FF]">{stats.pages}</span>
-                            <span className="text-xs text-[#8b949e]">Pages</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <span className="font-mono text-[1.2rem] font-bold text-[#00D4FF]">{stats.drawings}</span>
-                            <span className="text-xs text-[#8b949e]">Drawings</span>
-                        </div>
-                        {stats.tags > 0 && (
+                    {/* Stats Bar + Status — Tags only shown after dedup (when > 0); per-drawing tags are in each card */}
+                    <div className="flex items-center justify-between gap-5 p-[12px_20px] bg-[#0a0e17] border-b border-x border-[#30363d] flex-shrink-0">
+                        <div className="flex gap-5">
                             <div className="flex items-center gap-2">
-                                <span className="font-mono text-[1.2rem] font-bold text-[#00D4FF]">{stats.tags}</span>
-                                <span className="text-xs text-[#8b949e]">Tags</span>
+                                <span className="font-mono text-[1.2rem] font-bold text-[#00D4FF]">{stats.pages}</span>
+                                <span className="text-xs text-[#8b949e]">Pages</span>
                             </div>
-                        )}
+                            <div className="flex items-center gap-2">
+                                <span className="font-mono text-[1.2rem] font-bold text-[#00D4FF]">{stats.drawings}</span>
+                                <span className="text-xs text-[#8b949e]">Drawings</span>
+                            </div>
+                            {stats.tags > 0 && (
+                                <div className="flex items-center gap-2">
+                                    <span className="font-mono text-[1.2rem] font-bold text-[#00D4FF]">{stats.tags}</span>
+                                    <span className="text-xs text-[#8b949e]">Tags</span>
+                                </div>
+                            )}
+                        </div>
+                        <div className="text-xs text-[#8b949e] font-mono text-right">
+                            {statusLine}
+                        </div>
                     </div>
-                    <div className="text-xs text-[#8b949e] font-mono text-right">
-                        {statusLine}
-                    </div>
-                </div>
 
                     {/* Drawings List */}
                     <div ref={drawingsRef} className="flex-1 overflow-y-auto overflow-x-hidden p-5 border-x border-[#30363d] bg-transparent">

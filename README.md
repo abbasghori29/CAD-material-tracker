@@ -5,7 +5,7 @@ CAD Material Tracker: upload tag lists and PDF drawings, run AI-powered extracti
 ## Stack
 
 - **Backend:** FastAPI (Python 3.12), Postgres (Supabase), JWT auth, WebSocket for live progress
-- **Frontend:** Next.js 16 (ported to Next.js), React 19, Tailwind CSS
+- **Frontend:** Next.js 16, React 19, Tailwind CSS
 - **Deploy:** Backend on EC2 via systemd; frontend in Docker; Nginx as single entry (only port 80 exposed)
 
 ---
@@ -16,8 +16,8 @@ CAD Material Tracker: upload tag lists and PDF drawings, run AI-powered extracti
 
 ```bash
 # From repo root
-python -m venv venv312
-source venv312/bin/activate   # Windows: venv312\Scripts\activate
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 

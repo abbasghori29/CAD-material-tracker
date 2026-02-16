@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class DrawingLocationInfo(BaseModel):
     """Extracted location information from a CAD drawing."""
     drawing_id: str = Field(
-        description="The alphanumeric code/identifier for the drawing, usually found to the left of the title or in a circle. Examples: '1/A101', '5', 'A-2'. Return empty string if not found."
+        description="The alphanumeric code/identifier for the drawing, usually in BOLD at the bottom-left of the drawing, to the left of the title. Very commonly a letter+number like 'B7', 'A3', 'C1', 'D2'. Other formats: '1/A101', '5', 'A-2'. CAREFUL: 'B' is not '8', '7' is not '1'. Return empty string if not found."
     )
     location_description: str = Field(
         description="The location identifier/description found in the drawing title block or header. Examples: 'E1 1/8 RCP - LEVEL 3 PART B', 'C3 KITCHEN E1 ELEVATION 2', 'B1 SECTION AT EAST OF GARAGE - NS'. Return empty string if not found."

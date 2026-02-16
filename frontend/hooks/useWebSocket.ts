@@ -1,5 +1,6 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { getWsUrl, getApiUrl } from '../utils/api';
 
 export type JobStatus = 'idle' | 'running' | 'complete' | 'error';
 
@@ -41,28 +42,7 @@ export function useWebSocket({ onMessage, onOpen, onClose, onError }: UseWebSock
     useEffect(() => { onErrorRef.current = onError; }, [onError]);
     useEffect(() => { statusRef.current = status; }, [status]);
 
-    // Helper to determine WS URL
-    const getWsUrl = () => {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        let wsUrl = `${protocol}//${window.location.host}/ws`;
-        if (window.location.port === '3000') {
-            const hostname = window.location.hostname;
-            wsUrl = `${protocol}//${hostname}:8000/ws`;
-        }
-        const token = localStorage.getItem('ab_builders_token');
-        if (token) {
-            const separator = wsUrl.includes('?') ? '&' : '?';
-            wsUrl = `${wsUrl}${separator}token=${encodeURIComponent(token)}`;
-        }
-        return wsUrl;
-    };
 
-    // API base URL helper
-    const getApiUrl = () => {
-        return window.location.port === '3000'
-            ? `http://${window.location.hostname}:8000`
-            : '';
-    };
 
     // 1. Wake Lock
     const requestWakeLock = async () => {
@@ -104,7 +84,16 @@ export function useWebSocket({ onMessage, onOpen, onClose, onError }: UseWebSock
             return;
         }
 
-        const wsUrl = getWsUrl();
+        let wsUrl = getWsUrl();
+        if (!wsUrl) {
+            console.error('[WS] No WebSocket URL configured');
+            return;
+        }
+        const token = localStorage.getItem('ab_builders_token');
+        if (token) {
+            const separator = wsUrl.includes('?') ? '&' : '?';
+            wsUrl = `${wsUrl}${separator}token=${encodeURIComponent(token)}`;
+        }
         console.log('[WS] Connecting to:', wsUrl);
 
         try {
