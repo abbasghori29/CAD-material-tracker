@@ -427,7 +427,11 @@ def process_ocr_and_tags(
 
 # Position-based deduplication helpers
 def find_all_tag_positions_cleaned(tag_text: str, word_positions: List) -> List[Tuple[float, float]]:
-    """Find ALL positions of a tag in the word_positions list using CLEANED matching."""
+    """Find ALL positions of a tag in the word_positions list using CLEANED matching.
+    
+    Uses 'startswith' instead of exact match so that tags like A_WB-3
+    are found even when PyMuPDF extracts them as A_WB-3/A (longer token).
+    """
     if not word_positions:
         return []
     
@@ -436,13 +440,18 @@ def find_all_tag_positions_cleaned(tag_text: str, word_positions: List) -> List[
     
     for word, x, y in word_positions:
         word_cleaned = clean_tag_text(word)
-        if word_cleaned == tag_cleaned:
+        # startswith handles suffix cases like A_WB-3/A -> AWB3A
+        if word_cleaned.startswith(tag_cleaned):
+            # Check suffix to avoid partial number matches (e.g. matching 3 in 30)
+            suffix = word_cleaned[len(tag_cleaned):]
+            if suffix and suffix[0].isdigit():
+                continue
             positions.append((x, y))
     
     return positions
 
 
-def positions_are_same(pos1, pos2, tolerance=30) -> bool:
+def positions_are_same(pos1, pos2, tolerance=5) -> bool:
     """Check if two positions are the same tag (within tolerance)."""
     if pos1 is None or pos2 is None:
         return False
@@ -857,7 +866,9 @@ async def process_pdf_with_job(job: JobState):
                 gc.collect()
                 await asyncio.sleep(0.1)
             
-            # Position-based deduplication
+            # Position-based deduplication — PER TAG
+            # Each tag is deduplicated independently so nearby different tags
+            # (e.g. A_WB-3 and A_PT-3 in same ROOM FINISH table) don't interfere.
             all_detections = []
             
             print(f"[JOB-{job.job_id}] Searching {len(all_regions_data)} regions for {len(target_tags)} target tags...")
@@ -893,53 +904,54 @@ async def process_pdf_with_job(job: JobState):
             
             print(f"[JOB-{job.job_id}] Total raw detections: {len(all_detections)}")
             
-            # Group by unique position
-            unique_positions = []
+            # Group detections BY TAG first, then dedup positions within each tag
+            from collections import defaultdict as _defaultdict
+            detections_by_tag = _defaultdict(list)
+            for det in all_detections:
+                detections_by_tag[det['result']['tag']].append(det)
             
-            for detection in all_detections:
-                pos = detection['position']
-                
-                found_match = False
-                for unique in unique_positions:
-                    if positions_are_same(pos, unique['position'], tolerance=30):
-                        unique['detections'].append(detection)
-                        found_match = True
-                        break
-                
-                if not found_match:
-                    unique_positions.append({
-                        'position': pos,
-                        'detections': [detection]
-                    })
-            
-            duplicates_removed = len(all_detections) - len(unique_positions)
-            print(f"[JOB-{job.job_id}] Unique positions: {len(unique_positions)}, duplicates removed: {duplicates_removed}")
-            
-            # Assign to correct region — one row per tag (multiple tags at same position each get a row)
             final_results = []
+            total_dupes = 0
             
-            for unique in unique_positions:
-                tag_pos = unique['position']
-                detections = unique['detections']
+            for tag_name, tag_detections in detections_by_tag.items():
+                # Dedup positions within this tag only
+                unique_positions = []
                 
-                # Group by tag so we keep one result per tag (e.g. DT-02 and CS-02 at same position → both in CSV)
-                by_tag: dict[str, list] = {}
-                for d in detections:
-                    tag = d['result'].get('tag', '')
-                    by_tag.setdefault(tag, []).append(d)
+                for detection in tag_detections:
+                    pos = detection['position']
+                    
+                    found_match = False
+                    for unique in unique_positions:
+                        if positions_are_same(pos, unique['position'], tolerance=5):
+                            unique['detections'].append(detection)
+                            found_match = True
+                            break
+                    
+                    if not found_match:
+                        unique_positions.append({
+                            'position': pos,
+                            'detections': [detection]
+                        })
                 
-                for _tag, tag_detections in by_tag.items():
-                    if len(tag_detections) == 1:
-                        final_results.append(tag_detections[0]['result'])
+                dupes = len(tag_detections) - len(unique_positions)
+                total_dupes += dupes
+                
+                # For each unique position of this tag, pick the best detection
+                for unique in unique_positions:
+                    tag_pos = unique['position']
+                    dets = unique['detections']
+                    
+                    if len(dets) == 1:
+                        final_results.append(dets[0]['result'])
                     else:
                         containing_detections = [
-                            d for d in tag_detections
+                            d for d in dets
                             if d['mupdf_rect'] and is_point_inside_bbox(tag_pos, d['mupdf_rect'])
                         ]
                         
                         if len(containing_detections) == 0:
-                            print(f"[JOB-{job.job_id}] WARNING: Tag {_tag} at {tag_pos} not inside any mupdf_rect")
-                            final_results.append(tag_detections[0]['result'])
+                            print(f"[JOB-{job.job_id}] WARNING: Tag {tag_name} at {tag_pos} not inside any mupdf_rect")
+                            final_results.append(dets[0]['result'])
                         elif len(containing_detections) == 1:
                             final_results.append(containing_detections[0]['result'])
                         else:
@@ -950,8 +962,10 @@ async def process_pdf_with_job(job: JobState):
                                 if dist < min_distance:
                                     min_distance = dist
                                     best_detection = d
-                            print(f"[JOB-{job.job_id}] Tag {_tag} in multiple regions, assigned to drawing {best_detection['drawing_index']}")
+                            print(f"[JOB-{job.job_id}] Tag {tag_name} in multiple regions, assigned to drawing {best_detection['drawing_index']}")
                             final_results.append(best_detection['result'])
+            
+            print(f"[JOB-{job.job_id}] Unique positions: {len(final_results)}, duplicates removed: {total_dupes}")
             
             print(f"[JOB-{job.job_id}] Final results: {len(final_results)} unique tag(s)")
             

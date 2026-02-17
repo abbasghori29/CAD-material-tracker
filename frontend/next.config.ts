@@ -8,6 +8,10 @@ const nextConfig: NextConfig = {
   reactStrictMode: false,
   output: "standalone",
 
+  experimental: {
+    proxyClientMaxBodySize: "100mb",
+  },
+
   /**
    * Proxy all backend API calls through Next.js.
    * Browser only talks to the Next.js server (same origin = no CORS).
